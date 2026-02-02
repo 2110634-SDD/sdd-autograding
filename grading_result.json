@@ -1,0 +1,25 @@
+{
+  "milestone": "M0",
+  "total": 8,
+  "max": 20,
+  "items": [
+    {
+      "id": "team_file.exists",
+      "score": 4,
+      "max": 4,
+      "comment": "พบไฟล์ TEAM.md"
+    },
+    {
+      "id": "team_file.content",
+      "score": 4,
+      "max": 8,
+      "comment": "ไม่มีหัวข้อ Project Description / ไม่พบข้อมูล Team Members"
+    },
+    {
+      "id": "commit.contribution",
+      "score": 0,
+      "max": 8,
+      "comment": "ไม่มีข้อมูลสมาชิกทีม"
+    }
+  ]
+}
