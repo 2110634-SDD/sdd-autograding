@@ -11,6 +11,7 @@ class GradingContext:
         milestone = os.environ.get("MILESTONE")
         if not milestone:
             raise RuntimeError("MILESTONE env var not set")
+        milestone = milestone.lower()
 
         return cls(
             repo_path=".",

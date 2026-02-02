@@ -1,0 +1,41 @@
+name: Reusable Autograde
+
+on:
+  workflow_call:
+    inputs:
+      milestone:
+        required: true
+        type: string
+
+jobs:
+  autograde:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout student repo
+        uses: actions/checkout@v4
+
+      - name: Checkout grading logic
+        uses: actions/checkout@v4
+        with:
+          repository: 2110634-SDD/sdd-grading
+          path: grading
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run autograder
+        env:
+          MILESTONE: ${{ inputs.milestone }}
+        run: |
+          cd grading
+          python3 -m grader.main
+          cat grading_result.json
+
+      - name: Upload grading result
+        uses: actions/upload-artifact@v4
+        with:
+          name: grading-result
+          path: grading/grading_result.json
