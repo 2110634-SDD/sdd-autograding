@@ -4,22 +4,39 @@ on:
   workflow_call:
     inputs:
       milestone:
+        description: 'Milestone to grade (e.g. M0, M1, M2, M3)'
         required: true
+        type: string
+      tag:
+        description: 'Git tag to checkout (optional, defaults to milestone)'
+        required: false
         type: string
 
 jobs:
   autograde:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout student repo
+      - name: Checkout student repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine tag
+        id: vars
+        run: |
+          if [ -z "${{ inputs.tag }}" ]; then
+            echo "TAG=${{ inputs.milestone }}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Checkout grading logic
         uses: actions/checkout@v4
         with:
-          repository: 2110634-SDD/sdd-grading
-          path: grading
+          repository: 2110634-SDD/sdd-autograding
+          path: sdd-autograding
+          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -29,13 +46,20 @@ jobs:
       - name: Run autograder
         env:
           MILESTONE: ${{ inputs.milestone }}
+          TAG: ${{ steps.vars.outputs.TAG }}
         run: |
-          cd grading
-          python3 -m grader.main
-          cat grading_result.json
+          echo "▶ Grading milestone: $MILESTONE"
+          echo "▶ Using tag: $TAG"
+
+          git checkout "tags/$TAG"
+
+          python sdd-autograding/grader/main.py \
+            --milestone "$MILESTONE" \
+            --repo-path "$GITHUB_WORKSPACE" \
+            --output grading_result.json
 
       - name: Upload grading result
         uses: actions/upload-artifact@v4
         with:
-          name: grading-result
-          path: grading/grading_result.json
+          name: grading-result-${{ inputs.milestone }}
+          path: grading_result.json          
