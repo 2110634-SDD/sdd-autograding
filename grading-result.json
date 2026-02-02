@@ -1,0 +1,13 @@
+{
+  "milestone": "M0",
+  "total": 4,
+  "max": 4,
+  "items": [
+    {
+      "id": "team_file.exists",
+      "score": 4,
+      "max": 4,
+      "comment": "\u0e1e\u0e1a\u0e44\u0e1f\u0e25\u0e4c TEAM.md"
+    }
+  ]
+}
