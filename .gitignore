@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+
+# virtual env
+venv/
+.venv/
+env/
+
+# editor
+.vscode/
+.idea/
+
+# runtime outputs
+grading_result.json
+grading-result.json
