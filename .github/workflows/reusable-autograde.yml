@@ -53,6 +53,8 @@ jobs:
 
           git checkout "tags/$TAG"
 
+          cd sdd-autograding
+          
           python -m grader.main \
             --milestone "$MILESTONE" \
             --repo-path "$GITHUB_WORKSPACE" \
