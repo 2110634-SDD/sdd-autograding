@@ -55,18 +55,20 @@ jobs:
 
           git checkout "tags/$TAG"
 
-          mkdir -p "$GITHUB_WORKSPACE/grading"
-          OUT="$GITHUB_WORKSPACE/grading/grading_result_${MILESTONE}.json"
-
           cd sdd-autograding
           
           python -m grader.main \
             --milestone "$MILESTONE" \
             --repo-path "$GITHUB_WORKSPACE" \
-            --output "$OUT"
+            --output "$GITHUB_WORKSPACE/grading/grading_result_${MILESTONE}.json" || true
 
-          ls -la "$OUT"
-          test -f "$OUT"
+          mkdir -p "$GITHUB_WORKSPACE/grading"
+          SRC="$GITHUB_WORKSPACE/sdd-autograding/grading_result.json"
+          DST="$GITHUB_WORKSPACE/grading/grading_result_${MILESTONE}.json"
+
+          test -f "$SRC"
+          cp -f "$SRC" "$DST"
+          ls -la "$DST"
 
       - name: Debug  locate grading_result.json
         if: always()
