@@ -58,10 +58,10 @@ jobs:
           python -m grader.main \
             --milestone "$MILESTONE" \
             --repo-path "$GITHUB_WORKSPACE" \
-            --output "$GITHUB_WORKSPACE/grading_result_${MILESTONE}.json"
+            --output "$GITHUB_WORKSPACE/grading_result.json"
 
       - name: Upload grading result
         uses: actions/upload-artifact@v4
         with:
           name: grading-result-${{ inputs.milestone }}
-          path: grading_result_${MILESTONE}.json        
+          path: grading_result.json        
