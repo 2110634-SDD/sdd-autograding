@@ -60,6 +60,21 @@ jobs:
             --repo-path "$GITHUB_WORKSPACE" \
             --output "$GITHUB_WORKSPACE/grading_result.json"
 
+      - name: Debug: locate grading_result.json
+        if: always()
+        run: |
+          echo "PWD=$(pwd)"
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          echo "---- find grading_result.json ----"
+          find "$GITHUB_WORKSPACE" -maxdepth 5 -name "grading_result.json" -print -ls || true
+          echo "---- list workspace root ----"
+          ls -la "$GITHUB_WORKSPACE" || true
+          echo "---- list sdd-autograding ----"
+          ls -la "$GITHUB_WORKSPACE/sdd-autograding" || true
+
+
+
+
       - name: Upload grading result
         uses: actions/upload-artifact@v4
         with:
