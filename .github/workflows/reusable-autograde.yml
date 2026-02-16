@@ -38,13 +38,6 @@ on:
         type: boolean
         default: false
 
-      # Deprecated (kept for backward compatibility). This workflow will NOT commit results anymore.
-      commit_results:
-        description: "[DEPRECATED] commit grading result กลับเข้า repo ของนิสิต (true/false)"
-        required: false
-        type: boolean
-        default: false
-
       results_dir:
         description: "โฟลเดอร์ผลลัพธ์ใน student repo"
         required: false
@@ -75,8 +68,9 @@ jobs:
 
           if [ -n "$REF_INPUT" ]; then
             RESOLVED_REF="$REF_INPUT"
+            # best-effort: if looks like a tag name, expose it
             case "$REF_INPUT" in
-              v*|V*) SUBMISSION_TAG="$REF_INPUT" ;;
+              m*|M*|v*|V*) SUBMISSION_TAG="$REF_INPUT" ;;
               *) SUBMISSION_TAG="" ;;
             esac
           else
@@ -197,11 +191,7 @@ jobs:
             --summary-out "$SUMMARY_MD" \
             --annotations-out "$ANNO_TXT"
 
-          echo "---- Job Summary (Markdown) ----"
           cat "$SUMMARY_MD" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "---- GitHub Annotations ----"
-          # annotations lines already contain ::error/::warning/::notice format
           cat "$ANNO_TXT"
 
       - name: Upload grading artifact

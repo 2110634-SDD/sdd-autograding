@@ -1,3 +1,43 @@
+# milestones/m0.yml
 id: M0
-title: Team Setup
-max_score: 4
+title: "Team Setup & Tool Familiarization"
+max_score: 10
+
+policy:
+  # M0 is informational (not graded in course grade), but autograde should still be strict to teach workflow.
+  fail_on:
+    - BLOCKER
+  # Optional toggles (future use)
+  flags:
+    strict: true
+
+checks:
+  - id: M0.TEAM.01
+    title: "TEAM.md exists"
+    score: 4
+    severity: BLOCKER
+    type: fs.exists
+    path: "TEAM.md"
+    feedback:
+      what_failed: "ไม่พบไฟล์ TEAM.md ที่ root ของ repository"
+      why_it_matters: "Milestone 0 ใช้ฝึก workflow และยืนยันว่าทีมจัด setup ได้ถูกต้อง"
+      how_to_fix: "สร้างไฟล์ TEAM.md ที่ root ของ repo แล้ว commit + push จากนั้นติด tag ใหม่เพื่อให้ autograde rerun"
+
+  - id: M0.TEAM.02
+    title: "TEAM.md has minimum content signals"
+    score: 6
+    severity: MAJOR
+    type: md.signals
+    path: "TEAM.md"
+    signals:
+      # Heuristic: require at least 2 headings and at least 2 non-empty bullet lines
+      min_headings: 2
+      min_bullets: 2
+    feedback:
+      what_failed: "TEAM.md มีเนื้อหาไม่ครบตามสัญญาณขั้นต่ำ (หัวข้อ/รายการสมาชิก/รายละเอียดทีม)"
+      why_it_matters: "ช่วยให้ผู้สอนและทีมอื่นตรวจสอบทีมได้ และทำให้การทำงานร่วมกันเริ่มต้นได้ถูกต้อง"
+      how_to_fix: "เพิ่มหัวข้อและรายละเอียดสมาชิก/บทบาท/การติดต่อให้ครบ แล้ว commit + push และติด tag ใหม่เพื่อ rerun"
+
+notes:
+  - "ไฟล์นี้เป็น spec เพื่อเตรียมแยก policy/weights ออกจาก code (Step 4)"
+  - "runner ปัจจุบันอาจยังไม่ได้อ่าน fields ทั้งหมด แต่เก็บไว้เพื่อรองรับการขยายในอนาคต"

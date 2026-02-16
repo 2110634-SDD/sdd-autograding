@@ -34,7 +34,6 @@ def _norm_sev(x: Any) -> str:
 
 
 def _status_bool(check: Dict[str, Any]) -> Optional[bool]:
-    # Try common patterns
     for k in ("passed", "pass", "ok", "success"):
         if k in check and isinstance(check[k], bool):
             return check[k]
@@ -61,7 +60,6 @@ def _score_pair(check: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]
 
 
 def _evidence_to_file_line(ev: Any) -> Tuple[str, Optional[int]]:
-    # Evidence may be string or dict {path,line}
     if isinstance(ev, dict):
         path = _as_str(_get(ev, "path", "file", "filepath", default="")).strip()
         line = _get(ev, "line", "lineno", default=None)
@@ -70,7 +68,7 @@ def _evidence_to_file_line(ev: Any) -> Tuple[str, Optional[int]]:
         except Exception:
             line_i = None
         return path, line_i
-    # If string looks like "path:line" best-effort
+
     s = _as_str(ev).strip()
     if ":" in s:
         head, tail = s.rsplit(":", 1)
@@ -83,12 +81,10 @@ def _evidence_to_file_line(ev: Any) -> Tuple[str, Optional[int]]:
 
 
 def _extract_checks(result: Dict[str, Any]) -> List[Dict[str, Any]]:
-    # Try common containers
     for k in ("checks", "items", "results", "details"):
         v = result.get(k)
         if isinstance(v, list):
             return [x for x in v if isinstance(x, dict)]
-    # Some schemas nest under "report"
     rep = result.get("report")
     if isinstance(rep, dict):
         for k in ("checks", "items", "results"):
@@ -101,7 +97,6 @@ def _extract_checks(result: Dict[str, Any]) -> List[Dict[str, Any]]:
 def render(result: Dict[str, Any], milestone: str, submission_ref: str, submission_tag: str) -> Tuple[str, str]:
     checks = _extract_checks(result)
 
-    # total score
     total_score = _get(result, "total_score", "score_total", default=None)
     total_max = _get(result, "max_score", "score_max", "total_max", default=None)
 
@@ -114,7 +109,6 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
     except Exception:
         total_max_f = None
 
-    # compute from checks if missing
     if total_score_f is None or total_max_f is None:
         ssum = 0.0
         msum = 0.0
@@ -129,7 +123,6 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
             total_score_f = total_score_f if total_score_f is not None else ssum
             total_max_f = total_max_f if total_max_f is not None else msum
 
-    # classify checks
     failed: List[Dict[str, Any]] = []
     passed_cnt = 0
     sev_counts = {"BLOCKER": 0, "MAJOR": 0, "MINOR": 0, "INFO": 0, "UNKNOWN": 0}
@@ -144,12 +137,10 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
         elif pb is False:
             failed.append(c)
         else:
-            # Unknown status: treat as failed if score < max
             s, m = _score_pair(c)
             if s is not None and m is not None and s < m:
                 failed.append(c)
 
-    # sort failed by severity then id
     def _sort_key(c: Dict[str, Any]):
         sev = _norm_sev(_get(c, "severity", "level", default="UNKNOWN"))
         cid = _as_str(_get(c, "id", "check_id", "code", default=""))
@@ -157,22 +148,17 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
 
     failed.sort(key=_sort_key)
 
-    # Decide pass/fail: if result explicitly has status, respect it; else fail if any BLOCKER failed
     explicit_status = _as_str(_get(result, "status", "result", default="")).upper()
     if explicit_status in ("PASS", "PASSED", "OK", "SUCCESS"):
         overall = "PASS"
     elif explicit_status in ("FAIL", "FAILED", "ERROR"):
         overall = "FAIL"
     else:
-        # policy for now: FAIL if any failed BLOCKER
         any_blocker_fail = any(_norm_sev(_get(c, "severity", "level", default="UNKNOWN")) == "BLOCKER" for c in failed)
         overall = "FAIL" if any_blocker_fail else "PASS"
 
-    # Prepare "Action Now" = top 3 failed (blocker first)
     action_now = failed[:3]
 
-    # Markdown summary
-    score_line = ""
     if total_score_f is not None and total_max_f is not None and total_max_f > 0:
         score_line = f"**Score:** {total_score_f:.0f}/{total_max_f:.0f}"
     elif total_score_f is not None:
@@ -191,12 +177,8 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
     md.append(f"- **Status:** **{overall}**")
     md.append(f"- {score_line}")
     md.append("")
-    md.append(
-        f"- **Failed checks:** {len(failed)} / **Passed checks:** {passed_cnt} / **Total checks:** {len(checks)}"
-    )
-    md.append(
-        f"- **Severity counts:** BLOCKER={sev_counts.get('BLOCKER',0)}, MAJOR={sev_counts.get('MAJOR',0)}, MINOR={sev_counts.get('MINOR',0)}"
-    )
+    md.append(f"- **Failed checks:** {len(failed)} / **Passed checks:** {passed_cnt} / **Total checks:** {len(checks)}")
+    md.append(f"- **Severity counts:** BLOCKER={sev_counts.get('BLOCKER',0)}, MAJOR={sev_counts.get('MAJOR',0)}, MINOR={sev_counts.get('MINOR',0)}")
     md.append("")
 
     if action_now:
@@ -228,7 +210,6 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
             cid = _as_str(_get(c, "id", "check_id", "code", default="(no id)"))
             sev = _norm_sev(_get(c, "severity", "level", default="UNKNOWN"))
             s, m = _score_pair(c)
-            score_cell = ""
             if s is not None and m is not None:
                 score_cell = f"{int(s)}/{int(m)}"
             elif s is not None:
@@ -238,10 +219,7 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
             what = _as_str(_get(c, "what_failed", "message", "summary", default="")).replace("\n", " ").strip()
             how = _as_str(_get(c, "how_to_fix", "fix", "hint", default="")).replace("\n", " ").strip()
             ev = _get(c, "evidence", "evidences", default="")
-            if isinstance(ev, list) and ev:
-                ev0 = ev[0]
-            else:
-                ev0 = ev
+            ev0 = ev[0] if isinstance(ev, list) and ev else ev
             ev_path, ev_line = _evidence_to_file_line(ev0)
             ev_cell = ev_path
             if ev_line:
@@ -255,7 +233,6 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
 
     summary_md = "\n".join(md)
 
-    # Annotations text (printed to stdout in workflow)
     ann_lines: List[str] = []
     for c in failed:
         sev = _norm_sev(_get(c, "severity", "level", default="UNKNOWN"))
@@ -272,14 +249,10 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
             msg += f" | How to fix: {how}"
 
         ev = _get(c, "evidence", "evidences", default="")
-        if isinstance(ev, list) and ev:
-            ev0 = ev[0]
-        else:
-            ev0 = ev
+        ev0 = ev[0] if isinstance(ev, list) and ev else ev
         path, line = _evidence_to_file_line(ev0)
 
-        # Only add file/line if path looks like a file in repo
-        if path and ("/" in path or path.endswith(".md") or path.endswith(".png") or path.endswith(".puml") or path.endswith(".yml") or path.endswith(".yaml")):
+        if path and ("/" in path or path.endswith((".md",".png",".puml",".yml",".yaml",".json",".txt"))):
             if line and line > 0:
                 ann_lines.append(f"::{atype} file={path},line={line}::{msg}")
             else:
