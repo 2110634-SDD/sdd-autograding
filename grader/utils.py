@@ -1,5 +1,6 @@
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -88,27 +89,77 @@ def parse_team_members(text: str):
     return members
 
 
-def git_commit_emails(repo_path: Path, file_path="TEAM.md"):
+def _dbg(msg: str, debug: bool):
+    if debug:
+        print(f"[debug] {msg}", file=sys.stderr)
+
+
+def _git(cmd, cwd: Path, debug: bool):
+    _dbg(f"git cmd: {' '.join(cmd)} (cwd={cwd})", debug)
+    return subprocess.run(
+        cmd,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def _git_toplevel(repo_path: Path, debug: bool) -> Path | None:
+    try:
+        r = _git(["git", "rev-parse", "--show-toplevel"], cwd=repo_path, debug=debug)
+        top = r.stdout.strip()
+        return Path(top).resolve() if top else None
+    except Exception as e:
+        _dbg(f"git rev-parse failed: {e}", debug)
+        return None
+
+
+def git_commit_emails(repo_path: Path, file_path=None, debug: bool = False):
     """
-    Return set of commit author emails for given file.
+    Return set of commit author emails.
+    - If file_path is provided: only commits touching that file.
+    - If file_path is None: whole repo history.
     Never raises. Returns empty set if git is unavailable.
+
+    NOTE: This is intentionally deterministic and minimal:
+    - Uses git toplevel to avoid wrong cwd.
+    - Provides limited debug info if enabled.
     """
     try:
-        result = subprocess.run(
-            ["git", "log", "--pretty=%ae", "--", file_path],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except Exception:
-        return set()
+        top = _git_toplevel(repo_path, debug=debug) or repo_path.resolve()
 
-    return {
-        e.strip()
-        for e in result.stdout.splitlines()
-        if is_valid_email(e.strip())
-    }
+        cmd = ["git", "log", "--pretty=%ae"]
+        if file_path:
+            cmd += ["--", str(file_path)]
+
+        result = _git(cmd, cwd=top, debug=debug)
+
+        emails = [
+            e.strip()
+            for e in result.stdout.splitlines()
+            if is_valid_email(e.strip())
+        ]
+
+        # minimal debug output
+        if debug:
+            _dbg(f"git toplevel: {top}", debug)
+
+            try:
+                c = _git(["git", "rev-list", "--count", "HEAD"], cwd=top, debug=debug)
+                _dbg(f"commit_count={c.stdout.strip()}", debug)
+            except Exception as e:
+                _dbg(f"commit_count failed: {e}", debug)
+
+            uniq = sorted(set(emails))
+            _dbg(f"unique_emails={len(uniq)}", debug)
+            _dbg(f"emails_sample={', '.join(uniq[:10])}", debug)
+
+        return set(emails)
+
+    except Exception as e:
+        _dbg(f"git_commit_emails failed: {e}", debug)
+        return set()
 
 
 def is_valid_email(email: str) -> bool:

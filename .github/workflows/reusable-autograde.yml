@@ -4,155 +4,182 @@ on:
   workflow_call:
     inputs:
       milestone:
-        description: 'Milestone to grade (e.g. M0, M1, M2, M3)'
+        description: "Milestone id เช่น M0, M1, M2, M3"
         required: true
         type: string
-      tag:
-        description: 'Git tag to checkout (optional, defaults to milestone)'
+
+      # ✅ เพิ่ม: ref ของ student repo ที่จะ grade (tag/branch/sha)
+      student_ref:
+        description: "Git ref of student repo to grade (tag/branch/sha)"
         required: false
         type: string
+        default: ""
 
-# Required to commit/push grading results back to the student repository
+      autograder_repo:
+        description: "grading repo (owner/repo)"
+        required: false
+        type: string
+        default: "2110634-SDD/sdd-autograding"
+      autograder_ref:
+        description: "ref ของ grading repo (branch/tag/sha)"
+        required: false
+        type: string
+        default: "main"
+      python_version:
+        description: "Python version"
+        required: false
+        type: string
+        default: "3.11"
+      debug:
+        description: "เปิด debug logging (true/false)"
+        required: false
+        type: boolean
+        default: false
+      commit_results:
+        description: "commit grading result กลับเข้า repo ของนิสิต (true/false)"
+        required: false
+        type: boolean
+        default: false
+      results_dir:
+        description: "โฟลเดอร์ผลลัพธ์ใน student repo"
+        required: false
+        type: string
+        default: "grading"
+
 permissions:
   contents: write
+  actions: read
 
 jobs:
   autograde:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
 
     steps:
+      # 1) Checkout student repo (caller) at requested ref (tag/branch/sha)
       - name: Checkout student repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: true
+          # ✅ ถ้ามี student_ref ให้ checkout ที่ ref นั้น (เช่น tag M0)
+          ref: ${{ inputs.student_ref != '' && inputs.student_ref || github.ref }}
 
-      - name: Determine tag
-        id: vars
+      - name: Show workspace info
         shell: bash
         run: |
-          set -euo pipefail
-          if [ -z "${{ inputs.tag }}" ]; then
-            echo "TAG=${{ inputs.milestone }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "TAG=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          fi
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          echo "PWD=$(pwd)"
+          echo "GITHUB_REF=${GITHUB_REF}"
+          echo "GITHUB_REF_NAME=${GITHUB_REF_NAME}"
+          echo "DEFAULT_BRANCH=${{ github.event.repository.default_branch }}"
+          git rev-parse --show-toplevel || true
+          git rev-list --count HEAD || true
+          echo "HEAD SHA:"
+          git rev-parse HEAD || true
+          echo "Current ref:"
+          git show -s --oneline --decorate HEAD || true
 
-      - name: Checkout grading logic
+      # 2) Checkout autograder repo into subdir
+      - name: Checkout autograder repository
         uses: actions/checkout@v4
         with:
-          repository: 2110634-SDD/sdd-autograding
+          repository: ${{ inputs.autograder_repo }}
+          ref: ${{ inputs.autograder_ref }}
           path: sdd-autograding
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - name: Set up Python
+      # 3) Setup python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ inputs.python_version }}
+          cache: pip
 
+      # 4) Install dependencies (if any)
+      - name: Install autograder dependencies
+        shell: bash
+        working-directory: sdd-autograding
+        run: |
+          python -V
+          pip -V
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+
+      # 5) Run autograder
       - name: Run autograder
+        shell: bash
         env:
           MILESTONE: ${{ inputs.milestone }}
-          TAG: ${{ steps.vars.outputs.TAG }}
-        shell: bash
+          STUDENT_REPO_PATH: ${{ github.workspace }}
+          GRADER_DEBUG: ${{ inputs.debug && '1' || '0' }}
+        working-directory: sdd-autograding
         run: |
-          set -euxo pipefail
+          echo "▶ MILESTONE=$MILESTONE"
+          echo "▶ STUDENT_REPO_PATH=$STUDENT_REPO_PATH"
+          echo "▶ GRADER_DEBUG=$GRADER_DEBUG"
+          python -m grader.main
 
-          echo "▶ Grading milestone: $MILESTONE"
-          echo "▶ Using tag: $TAG"
+      # 6) Verify results exist
+      - name: Verify grading result
+        shell: bash
+        env:
+          MILESTONE: ${{ inputs.milestone }}
+          RESULTS_DIR: ${{ inputs.results_dir }}
+        run: |
+          echo "▶ Checking result files in student repo"
+          ls -la
+          echo "▶ ${RESULTS_DIR}/"
+          ls -la "${RESULTS_DIR}" || true
 
-          # Checkout the tagged submission (usually detached HEAD)
-          git checkout "tags/$TAG"
-
-          # Ensure destination folder exists in student workspace
-          mkdir -p "$GITHUB_WORKSPACE/grading"
-          DST="$GITHUB_WORKSPACE/grading/grading_result_${MILESTONE}.json"
-
-          # Run autograder (grading repo code)
-          # NOTE: grader runs under sdd-autograding/ so its default output is inside that folder
-          cd sdd-autograding
-          python -m grader.main || true
-          cd "$GITHUB_WORKSPACE"
-
-          # Possible result locations (depending on your grader/core/context.py version)
-          CANDIDATES=(
-            "$GITHUB_WORKSPACE/grading/grading_result_${MILESTONE}.json"
-            "$GITHUB_WORKSPACE/sdd-autograding/grading/grading_result_${MILESTONE}.json"
-            "$GITHUB_WORKSPACE/sdd-autograding/grading_result.json"
-          )
-
-          SRC=""
-          for f in "${CANDIDATES[@]}"; do
-            if [ -f "$f" ]; then
-              SRC="$f"
-              break
-            fi
-          done
-
-          if [ -z "$SRC" ]; then
-            echo "[ERROR] No grading result found. Checked:"
-            printf ' - %s\n' "${CANDIDATES[@]}"
+          RESULT_PATH="${RESULTS_DIR}/grading_result_${MILESTONE}.json"
+          if [ ! -f "$RESULT_PATH" ]; then
+            echo "::error::Missing result file: $RESULT_PATH"
+            echo "Search possible result files:"
+            find . -maxdepth 3 -type f -name "grading_result*.json" -print
             exit 1
           fi
 
-          echo "Found result at: $SRC"
-          echo "Normalizing to:  $DST"
+          echo "Found: $RESULT_PATH"
+          echo "Preview (first 60 lines):"
+          sed -n '1,60p' "$RESULT_PATH"
 
-          # Copy only if SRC and DST are not the same file
-          SRC_REAL="$(realpath -m "$SRC")"
-          DST_REAL="$(realpath -m "$DST")"
-          if [ "$SRC_REAL" = "$DST_REAL" ]; then
-            echo "Skip copy: SRC and DST are the same file: $SRC_REAL"
-          else
-            cp -f "$SRC" "$DST"
-          fi
-
-          ls -la "$DST"
-          
-      - name: Debug locate grading_result.json
-        if: always()
-        shell: bash
-        run: |
-          set -euxo pipefail
-          echo "PWD=$(pwd)"
-          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
-          echo "---- find grading_result.json ----"
-          find "$GITHUB_WORKSPACE" -maxdepth 5 -name "grading_result.json" -print -ls || true
-          echo "---- list workspace root ----"
-          ls -la "$GITHUB_WORKSPACE" || true
-          echo "---- list sdd-autograding ----"
-          ls -la "$GITHUB_WORKSPACE/sdd-autograding" || true
-          echo "---- list grading ----"
-          ls -la "$GITHUB_WORKSPACE/grading" || true
-
-      - name: Upload grading result artifact
+      # 7) Upload artifact
+      - name: Upload grading artifact
         uses: actions/upload-artifact@v4
         with:
-          name: grading-result-${{ inputs.milestone }}
-          path: grading/grading_result_${{ inputs.milestone }}.json
+          name: grading_result_${{ inputs.milestone }}
+          path: |
+            ${{ inputs.results_dir }}/grading_result_${{ inputs.milestone }}.json
+            grading_result.json
           if-no-files-found: error
 
-      - name: Commit grading result into student repo
-        if: always()
+      # 8) Optionally commit results back to student repo
+      - name: Commit grading result to student repo
+        if: ${{ inputs.commit_results }}
         shell: bash
+        env:
+          MILESTONE: ${{ inputs.milestone }}
+          RESULTS_DIR: ${{ inputs.results_dir }}
         run: |
-          set -euo pipefail
+          set -e
+          RESULT_PATH="${RESULTS_DIR}/grading_result_${MILESTONE}.json"
 
-          M="${{ inputs.milestone }}"
-          SRC_REL="grading/grading_result_${M}.json"
-          SRC_ABS="$GITHUB_WORKSPACE/$SRC_REL"
-          TMP="/tmp/grading_result_${M}.json"
+          git config user.name  "autograder-bot"
+          git config user.email "autograder-bot@users.noreply.github.com"
 
-          if [ ! -f "$SRC_ABS" ]; then
-            echo "No grading result file found at $SRC_ABS"
+          mkdir -p "${RESULTS_DIR}"
+          git add "$RESULT_PATH" grading_result.json || true
+
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes to commit."
             exit 0
           fi
 
-          # Save result to a temp location so branch checkout won't wipe it
-          cp -f "$SRC_ABS" "$TMP"
-          ls -la "$TMP"
+          git commit -m "chore(autograde): add grading result for ${MILESTONE}" || true
+          git push
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
-          echo "Default branch: $DEFAULT_BRANCH"
+      - name: Done
+        shell: bash
+        run: |
+          echo "✅ Autograde finished for milestone=${{ inputs.milestone }}"
