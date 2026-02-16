@@ -8,7 +8,6 @@ on:
         required: true
         type: string
 
-      # ✅ ref ของ student repo ที่จะ grade (tag/branch/sha) — ใช้ตอนทดสอบ tag เก่า เช่น M0
       student_ref:
         description: "Git ref of student repo to grade (tag/branch/sha)"
         required: false
@@ -96,10 +95,8 @@ jobs:
         run: |
           echo "Listing sdd-autograding/ (top-level):"
           ls -la sdd-autograding || true
-          echo "Find common dependency files (may be none; that's OK):"
-          find sdd-autograding -maxdepth 3 -type f \( -name "requirements.txt" -o -name "pyproject.toml" -o -name "poetry.lock" -o -name "setup.cfg" \) -print || true
 
-      # 3) Setup python (✅ NO pip cache to avoid dependency-file mismatch errors)
+      # 3) Setup python (NO pip cache)
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -123,7 +120,6 @@ jobs:
         shell: bash
         env:
           MILESTONE: ${{ inputs.milestone }}
-          # สำคัญ: ให้ context.py ใช้ student repo เสมอ แม้ cd ไป sdd-autograding
           STUDENT_REPO_PATH: ${{ github.workspace }}
           GRADER_DEBUG: ${{ inputs.debug && '1' || '0' }}
         working-directory: sdd-autograding
@@ -140,24 +136,14 @@ jobs:
           MILESTONE: ${{ inputs.milestone }}
           RESULTS_DIR: ${{ inputs.results_dir }}
         run: |
-          echo "▶ Checking result files in student repo"
-          echo "Workspace root:"
-          ls -la
-
-          echo "▶ ${RESULTS_DIR}/"
-          ls -la "${RESULTS_DIR}" || true
-
           RESULT_PATH="${RESULTS_DIR}/grading_result_${MILESTONE}.json"
           if [ ! -f "$RESULT_PATH" ]; then
             echo "::error::Missing result file: $RESULT_PATH"
-            echo "Search possible result files:"
             find . -maxdepth 4 -type f -name "grading_result*.json" -print
             exit 1
           fi
-
           echo "Found: $RESULT_PATH"
-          echo "Preview (first 80 lines):"
-          sed -n '1,80p' "$RESULT_PATH"
+          sed -n '1,40p' "$RESULT_PATH"
 
       # 7) Upload artifact
       - name: Upload grading artifact
@@ -170,23 +156,47 @@ jobs:
           if-no-files-found: error
 
       # 8) Optionally commit results back to student repo
-      - name: Commit grading result to student repo
+      # ✅ FIX: Even if we graded a tag (detached HEAD), we commit to DEFAULT_BRANCH
+      - name: Commit grading result to student repo (default branch)
         if: ${{ inputs.commit_results }}
         shell: bash
         env:
           MILESTONE: ${{ inputs.milestone }}
           RESULTS_DIR: ${{ inputs.results_dir }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -e
 
           RESULT_PATH="${RESULTS_DIR}/grading_result_${MILESTONE}.json"
-          echo "▶ Preparing to commit: $RESULT_PATH"
+          LEGACY_PATH="grading_result.json"
+
+          echo "▶ Preparing to commit results to default branch: ${DEFAULT_BRANCH}"
+          echo "Current HEAD:"
+          git show -s --oneline --decorate HEAD || true
+
+          # copy results out to a safe place before switching branches
+          mkdir -p /tmp/grading_out
+          cp -f "$RESULT_PATH" "/tmp/grading_out/$(basename "$RESULT_PATH")"
+          if [ -f "$LEGACY_PATH" ]; then
+            cp -f "$LEGACY_PATH" "/tmp/grading_out/$(basename "$LEGACY_PATH")"
+          fi
+
+          # switch to default branch
+          git fetch origin "${DEFAULT_BRANCH}:${DEFAULT_BRANCH}" || true
+          git checkout "${DEFAULT_BRANCH}"
+          git pull --ff-only origin "${DEFAULT_BRANCH}" || true
+
+          # restore results into working tree
+          mkdir -p "${RESULTS_DIR}"
+          cp -f "/tmp/grading_out/$(basename "$RESULT_PATH")" "$RESULT_PATH"
+          if [ -f "/tmp/grading_out/$(basename "$LEGACY_PATH")" ]; then
+            cp -f "/tmp/grading_out/$(basename "$LEGACY_PATH")" "$LEGACY_PATH"
+          fi
 
           git config user.name  "autograder-bot"
           git config user.email "autograder-bot@users.noreply.github.com"
 
-          mkdir -p "${RESULTS_DIR}"
-          git add "$RESULT_PATH" grading_result.json || true
+          git add "$RESULT_PATH" "$LEGACY_PATH" || true
 
           if [ -z "$(git status --porcelain)" ]; then
             echo "No changes to commit."
@@ -194,7 +204,7 @@ jobs:
           fi
 
           git commit -m "chore(autograde): add grading result for ${MILESTONE}" || true
-          git push
+          git push origin "${DEFAULT_BRANCH}"
 
       - name: Done
         shell: bash
