@@ -251,6 +251,15 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
         if how:
             msg += f" | How to fix: {how}"
 
+        # ✅ include evidence (e.g., missing emails / lines to fix)
+        ev = _as_str(_get(c, "evidence", "evidences", default="")).strip()
+        if ev:
+            # keep annotations single-line and not too long
+            ev_one = " / ".join([ln.strip() for ln in ev.splitlines() if ln.strip()])
+            if len(ev_one) > 220:
+                ev_one = ev_one[:220] + "..."
+            msg += f" | Evidence: {ev_one}"
+
         ev = _get(c, "evidence", "evidences", default="")
         ev0 = ev[0] if isinstance(ev, list) and ev else ev
         path, line = _evidence_to_file_line(ev0)
