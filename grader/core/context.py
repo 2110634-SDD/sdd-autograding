@@ -1,13 +1,14 @@
+# grader/core/context.py
+
 import json
 import os
 from pathlib import Path
 
 
 class GradingContext:
-    def __init__(self, repo_path: Path, milestone: str, debug: bool = False):
+    def __init__(self, repo_path: Path, milestone: str):
         self.repo_path = repo_path
         self.milestone = milestone
-        self.debug = debug
 
     @classmethod
     def from_env(cls):
@@ -16,39 +17,25 @@ class GradingContext:
         if not milestone:
             milestone = "UNKNOWN"
 
-        # debug logging toggle (minimal)
-        debug = os.environ.get("GRADER_DEBUG", "").strip().lower() in {"1", "true", "yes"}
+        # ✅ Always grade the student repo workspace, even if we run inside sdd-autograding/
+        base = (
+            os.environ.get("STUDENT_REPO_PATH")
+            or os.environ.get("REPO_PATH")
+            or os.environ.get("GITHUB_WORKSPACE")
+        )
 
-        # repo_path: MUST point to student repo root even if workflow cd into sdd-autograding
-        # Priority:
-        # 1) STUDENT_REPO_PATH (explicit override)
-        # 2) GITHUB_WORKSPACE (GitHub Actions standard)
-        # 3) local fallback: current directory
-        student_repo_path = os.environ.get("STUDENT_REPO_PATH", "").strip()
-        workspace = os.environ.get("GITHUB_WORKSPACE", "").strip()
+        try:
+            repo_path = Path(base).resolve() if base else Path(".").resolve()
+        except Exception:
+            repo_path = Path.cwd()
 
-        if student_repo_path:
-            repo_path = Path(student_repo_path).resolve()
-        elif workspace:
-            repo_path = Path(workspace).resolve()
-        else:
-            # local fallback
-            try:
-                repo_path = Path(".").resolve()
-            except Exception:
-                repo_path = Path.cwd()
-
-        if debug:
-            print(f"[debug] ctx.milestone={milestone}")
-            print(f"[debug] ctx.repo_path={repo_path}")
-
-        return cls(repo_path, milestone, debug=debug)
+        return cls(repo_path, milestone)
 
     def write_result(self, *, milestone, total, max, items):
         """
         Write grading result.
-        - Always writes legacy: <repo>/grading_result.json
-        - Also writes milestone-specific: <repo>/grading/grading_result_<M>.json
+        - Writes legacy: <repo>/grading_result.json (backward-compatible)
+        - Writes milestone-specific: <repo>/grading/grading_result_<M>.json
         This method must never raise.
         """
         result = {
@@ -72,6 +59,7 @@ class GradingContext:
             milestone_dir.mkdir(parents=True, exist_ok=True)
             milestone_path.write_text(payload, encoding="utf-8")
 
+            print(f"[autograder] repo_path={self.repo_path}")
             print(f"[autograder] result written to {legacy_path}")
             print(f"[autograder] result written to {milestone_path}")
 

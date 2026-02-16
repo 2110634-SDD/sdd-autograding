@@ -63,11 +63,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-          ref: ${{ inputs.student_ref != '' && inputs.student_ref || github.ref }}
+          # ✅ Prefer explicit ref from caller; otherwise use the triggering SHA (deterministic for workflow_call)
+          ref: ${{ inputs.student_ref != '' && inputs.student_ref || github.sha }}
 
       - name: Show student repo info
         shell: bash
         run: |
+          set -euo pipefail
           echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
           echo "PWD=$(pwd)"
           echo "GITHUB_REF=${GITHUB_REF}"
@@ -94,6 +96,7 @@ jobs:
         shell: bash
         working-directory: sdd-autograding
         run: |
+          set -euo pipefail
           python -V
           pip -V
           if [ -f requirements.txt ]; then
@@ -106,10 +109,12 @@ jobs:
         shell: bash
         env:
           MILESTONE: ${{ inputs.milestone }}
+          # ✅ Used by GradingContext.from_env() to grade the student repo even when running inside sdd-autograding/
           STUDENT_REPO_PATH: ${{ github.workspace }}
           GRADER_DEBUG: ${{ inputs.debug && '1' || '0' }}
         working-directory: sdd-autograding
         run: |
+          set -euo pipefail
           echo "▶ MILESTONE=$MILESTONE"
           echo "▶ STUDENT_REPO_PATH=$STUDENT_REPO_PATH"
           echo "▶ GRADER_DEBUG=$GRADER_DEBUG"
@@ -121,14 +126,16 @@ jobs:
           MILESTONE: ${{ inputs.milestone }}
           RESULTS_DIR: ${{ inputs.results_dir }}
         run: |
+          set -euo pipefail
           RESULT_PATH="${RESULTS_DIR}/grading_result_${MILESTONE}.json"
           if [ ! -f "$RESULT_PATH" ]; then
             echo "::error::Missing result file: $RESULT_PATH"
-            find . -maxdepth 4 -type f -name "grading_result*.json" -print
+            echo "Found these grading_result*.json files:"
+            find . -maxdepth 6 -type f -name "grading_result*.json" -print || true
             exit 1
           fi
           echo "Found: $RESULT_PATH"
-          sed -n '1,40p' "$RESULT_PATH"
+          sed -n '1,80p' "$RESULT_PATH"
 
       - name: Upload grading artifact
         uses: actions/upload-artifact@v4
@@ -139,7 +146,6 @@ jobs:
             grading_result.json
           if-no-files-found: error
 
-      # ✅ FIXED: handle untracked result files before switching branches
       - name: Commit grading result to student repo (default branch)
         if: ${{ inputs.commit_results }}
         shell: bash
@@ -148,19 +154,26 @@ jobs:
           RESULTS_DIR: ${{ inputs.results_dir }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          set -e
+          set -euo pipefail
 
           RESULT_PATH="${RESULTS_DIR}/grading_result_${MILESTONE}.json"
           LEGACY_PATH="grading_result.json"
+
+          if [ ! -f "$RESULT_PATH" ]; then
+            echo "::warning::Result file missing, skip commit: $RESULT_PATH"
+            exit 0
+          fi
 
           echo "▶ Preparing to commit results to default branch: ${DEFAULT_BRANCH}"
           echo "Current HEAD:"
           git show -s --oneline --decorate HEAD || true
 
-          # Stash untracked files (results are often untracked when running on a tag / detached HEAD)
-          # This avoids: "untracked working tree files would be overwritten by checkout"
-          if [ -n "$(git status --porcelain)" ]; then
-            git stash push --include-untracked -m "autograde-results" || true
+          # Save results to temp to survive branch checkout (tag/detached-head safe)
+          TMP_DIR="/tmp/autograde"
+          mkdir -p "$TMP_DIR"
+          cp -f "$RESULT_PATH" "$TMP_DIR/$(basename "$RESULT_PATH")"
+          if [ -f "$LEGACY_PATH" ]; then
+            cp -f "$LEGACY_PATH" "$TMP_DIR/$(basename "$LEGACY_PATH")"
           fi
 
           # Switch to default branch safely
@@ -168,17 +181,11 @@ jobs:
           git checkout "${DEFAULT_BRANCH}"
           git pull --ff-only origin "${DEFAULT_BRANCH}" || true
 
-          # Restore stashed results (if any)
-          if git stash list | grep -q "autograde-results"; then
-            git stash pop || true
-          fi
-
-          # Ensure files exist in working tree (in case stash pop didn't apply due to conflicts)
-          # If missing, try to re-copy from current tree path (best effort, deterministic)
+          # Restore results into working tree
           mkdir -p "${RESULTS_DIR}"
-
-          if [ ! -f "$RESULT_PATH" ]; then
-            echo "::warning::Result file missing after stash pop: $RESULT_PATH"
+          cp -f "$TMP_DIR/$(basename "$RESULT_PATH")" "$RESULT_PATH"
+          if [ -f "$TMP_DIR/$(basename "$LEGACY_PATH")" ]; then
+            cp -f "$TMP_DIR/$(basename "$LEGACY_PATH")" "$LEGACY_PATH"
           fi
 
           git config user.name  "autograder-bot"
@@ -186,15 +193,16 @@ jobs:
 
           git add "$RESULT_PATH" "$LEGACY_PATH" || true
 
-          if [ -z "$(git status --porcelain)" ]; then
+          if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
           fi
 
-          git commit -m "chore(autograde): add grading result for ${MILESTONE}" || true
+          git commit -m "chore(autograde): add grading result for ${MILESTONE} [skip ci]" || true
           git push origin "${DEFAULT_BRANCH}"
 
       - name: Done
         shell: bash
         run: |
+          set -euo pipefail
           echo "✅ Autograde finished for milestone=${{ inputs.milestone }}"
