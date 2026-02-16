@@ -6,9 +6,11 @@ import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-
 SEV_ORDER = {"BLOCKER": 0, "MAJOR": 1, "MINOR": 2, "INFO": 3, "UNKNOWN": 9}
 SEV_TO_ANNOT = {"BLOCKER": "error", "MAJOR": "warning", "MINOR": "notice", "INFO": "notice", "UNKNOWN": "warning"}
+
+# hard limit for GitHub annotations message length (keep safe)
+ANNOT_MAX = 900
 
 
 def _get(d: Dict[str, Any], *keys: str, default: Any = None) -> Any:
@@ -94,11 +96,53 @@ def _extract_checks(result: Dict[str, Any]) -> List[Dict[str, Any]]:
     return []
 
 
+def _fallback_fields_from_comment(c: Dict[str, Any]) -> Tuple[str, str, str]:
+    comment = _as_str(_get(c, "comment", default="")).strip()
+    if not comment:
+        return "", "", ""
+
+    # Keep multi-line comment as what_failed by default
+    what = comment
+    how = ""
+    ev = ""
+
+    # Heuristic split if certain Thai markers exist
+    if "วิธีแก้:" in comment:
+        before, after = comment.split("วิธีแก้:", 1)
+        what = before.strip(" \n|")
+        how = after.strip()
+
+    if "บรรทัดที่ต้องแก้" in comment:
+        # allow "บรรทัดที่ต้องแก้ (TEAM.md):"
+        m = comment.split("บรรทัดที่ต้องแก้", 1)
+        if len(m) == 2:
+            before = m[0]
+            after = "บรรทัดที่ต้องแก้" + m[1]
+            what = before.strip(" \n|")
+            ev = after.strip()
+
+    return what, how, ev
+
+
+def _one_line(s: str) -> str:
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    # compress whitespace but keep bullet markers visible
+    s = s.replace("\n", " ⏎ ")
+    s = " ".join(s.split())
+    return s.strip()
+
+
+def _truncate(s: str, n: int) -> str:
+    if len(s) <= n:
+        return s
+    return s[: max(0, n - 3)] + "..."
+
+
 def render(result: Dict[str, Any], milestone: str, submission_ref: str, submission_tag: str) -> Tuple[str, str]:
     checks = _extract_checks(result)
 
-    total_score = _get(result, "total_score", "score_total", default=None)
-    total_max = _get(result, "max_score", "score_max", "total_max", default=None)
+    total_score = _get(result, "total_score", "score_total", "total", default=None)
+    total_max = _get(result, "max_score", "score_max", "total_max", "max", default=None)
 
     try:
         total_score_f = float(total_score) if total_score is not None else None
@@ -109,6 +153,7 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
     except Exception:
         total_max_f = None
 
+    # derive if missing
     if total_score_f is None or total_max_f is None:
         ssum = 0.0
         msum = 0.0
@@ -128,18 +173,37 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
     sev_counts = {"BLOCKER": 0, "MAJOR": 0, "MINOR": 0, "INFO": 0, "UNKNOWN": 0}
 
     for c in checks:
-        sev = _norm_sev(_get(c, "severity", "level", default="UNKNOWN"))
-        sev_counts[sev] = sev_counts.get(sev, 0) + 1
+        sev_raw = _get(c, "severity", "level", default=None)
+        sev = _norm_sev(sev_raw) if sev_raw is not None else "UNKNOWN"
 
         pb = _status_bool(c)
+        s, m = _score_pair(c)
+
+        if pb is None and s is not None and m is not None:
+            pb = (m <= 0) or (s >= m)
+
         if pb is True:
             passed_cnt += 1
-        elif pb is False:
-            failed.append(c)
+            if sev == "UNKNOWN":
+                sev = "INFO"
         else:
-            s, m = _score_pair(c)
-            if s is not None and m is not None and s < m:
-                failed.append(c)
+            # treat as failed
+            if sev == "UNKNOWN":
+                sev = "MAJOR"
+            failed.append(c)
+
+        sev_counts[sev] = sev_counts.get(sev, 0) + 1
+        c["severity"] = sev
+
+        # legacy fallback: comment -> what/how/evidence
+        if not _get(c, "what_failed", "message", "summary", default=""):
+            what, how, ev = _fallback_fields_from_comment(c)
+            if what:
+                c["what_failed"] = what
+            if how and not _get(c, "how_to_fix", "fix", "hint", default=""):
+                c["how_to_fix"] = how
+            if ev and not _get(c, "evidence", "evidences", default=""):
+                c["evidence"] = ev
 
     def _sort_key(c: Dict[str, Any]):
         sev = _norm_sev(_get(c, "severity", "level", default="UNKNOWN"))
@@ -188,12 +252,11 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
             cid = _as_str(_get(c, "id", "check_id", "code", default="(no id)"))
             title = _as_str(_get(c, "title", "name", default="")).strip()
             sev = _norm_sev(_get(c, "severity", "level", default="UNKNOWN"))
-            what = _as_str(_get(c, "what_failed", "message", "summary", default="")).strip()
+            what = _as_str(_get(c, "what_failed", "message", "summary", "comment", default="")).strip()
             how = _as_str(_get(c, "how_to_fix", "fix", "hint", default="")).strip()
             ev = _as_str(_get(c, "evidence", "evidences", default="")).strip()
-            label = f"**{cid}**"
-            if title:
-                label += f" — {title}"
+
+            label = f"**{cid}**" + (f" — {title}" if title else "")
             line = f"- [{sev}] {label}: {what if what else 'Check failed'}"
             if how:
                 line += f"  \n  ↳ **How to fix:** {how}"
@@ -219,15 +282,10 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
                 score_cell = f"{int(s)}"
             else:
                 score_cell = ""
-            what = _as_str(_get(c, "what_failed", "message", "summary", default="")).replace("\n", " ").strip()
-            how = _as_str(_get(c, "how_to_fix", "fix", "hint", default="")).replace("\n", " ").strip()
-            ev = _get(c, "evidence", "evidences", default="")
-            ev0 = ev[0] if isinstance(ev, list) and ev else ev
-            ev_path, ev_line = _evidence_to_file_line(ev0)
-            ev_cell = ev_path
-            if ev_line:
-                ev_cell = f"{ev_path}:{ev_line}"
-            md.append(f"| `{cid}` | {sev} | {score_cell} | {what} | {how} | `{ev_cell}` |")
+            what = _one_line(_as_str(_get(c, "what_failed", "message", "summary", "comment", default="")))
+            how = _one_line(_as_str(_get(c, "how_to_fix", "fix", "hint", default="")))
+            ev = _one_line(_as_str(_get(c, "evidence", "evidences", default="")))
+            md.append(f"| `{cid}` | {sev} | {score_cell} | {what} | {how} | {ev} |")
     md.append("")
     md.append("## Notes")
     md.append("")
@@ -244,33 +302,20 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
         cid = _as_str(_get(c, "id", "check_id", "code", default="(no id)"))
         title = _as_str(_get(c, "title", "name", default="")).strip()
 
-        what = _as_str(_get(c, "what_failed", "message", "summary", default="Check failed")).strip()
+        what = _as_str(_get(c, "what_failed", "message", "summary", "comment", default="Check failed")).strip()
         how = _as_str(_get(c, "how_to_fix", "fix", "hint", default="")).strip()
+        ev = _as_str(_get(c, "evidence", "evidences", default="")).strip()
 
         msg = f"[{cid}] {title + ' — ' if title else ''}{what}"
         if how:
             msg += f" | How to fix: {how}"
-
-        # ✅ include evidence (e.g., missing emails / lines to fix)
-        ev = _as_str(_get(c, "evidence", "evidences", default="")).strip()
         if ev:
-            # keep annotations single-line and not too long
-            ev_one = " / ".join([ln.strip() for ln in ev.splitlines() if ln.strip()])
-            if len(ev_one) > 220:
-                ev_one = ev_one[:220] + "..."
-            msg += f" | Evidence: {ev_one}"
+            msg += f" | Evidence: {ev}"
 
-        ev = _get(c, "evidence", "evidences", default="")
-        ev0 = ev[0] if isinstance(ev, list) and ev else ev
-        path, line = _evidence_to_file_line(ev0)
+        msg = _truncate(_one_line(msg), ANNOT_MAX)
 
-        if path and ("/" in path or path.endswith((".md",".png",".puml",".yml",".yaml",".json",".txt"))):
-            if line and line > 0:
-                ann_lines.append(f"::{atype} file={path},line={line}::{msg}")
-            else:
-                ann_lines.append(f"::{atype} file={path}::{msg}")
-        else:
-            ann_lines.append(f"::{atype}::{msg}")
+        # no file/line for this check by default
+        ann_lines.append(f"::{atype}::{msg}")
 
     annotations_txt = "\n".join(ann_lines) + ("\n" if ann_lines else "")
     return summary_md, annotations_txt
@@ -279,7 +324,7 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--result", required=True, help="Path to grading_result_*.json")
-    ap.add_argument("--milestone", required=True, help="Milestone id เช่น M1")
+    ap.add_argument("--milestone", required=True, help="Milestone id เช่น M0")
     ap.add_argument("--submission-ref", default="", help="Submission ref (tag/sha/branch)")
     ap.add_argument("--submission-tag", default="", help="Submission tag if applicable")
     ap.add_argument("--summary-out", required=True, help="Output markdown path")
