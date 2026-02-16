@@ -48,6 +48,7 @@ def _parse_expected_members(team_md: Path) -> List[ExpectedMember]:
         s = ln.strip()
         if not s:
             continue
+        # Accept bullet list / numbered list / table rows or any line with email
         if not _looks_like_member_line(s) and "@" not in s:
             continue
 
@@ -80,6 +81,10 @@ def _get_contributor_emails(repo: Path) -> Set[str]:
 def _evaluate(repo_path: Path) -> Tuple[int, int, str, str, str]:
     """
     Returns: (score, max_score, what_failed, how_to_fix, evidence)
+
+    Key intent:
+      - Evidence must clearly show WHICH email(s) are missing commits.
+      - No API / PAT needed: rely on git author emails.
     """
     max_score = 6
     team_md = repo_path / "TEAM.md"
@@ -103,6 +108,7 @@ def _evaluate(repo_path: Path) -> Tuple[int, int, str, str, str]:
             "TEAM.md (no parsable members)",
         )
 
+    # Enforce email presence to make verification deterministic (no API needed)
     missing_email_lines = [m.raw_line for m in expected if _looks_like_member_line(m.raw_line) and not m.email]
     if missing_email_lines:
         preview = "\n".join(missing_email_lines[:8])
@@ -130,33 +136,39 @@ def _evaluate(repo_path: Path) -> Tuple[int, int, str, str, str]:
         )
 
     score = max(0, max_score - len(missing_emails) * 3)
+    missing_list = "\n".join([f"- {e}" for e in missing_emails])
+
     return (
         score,
         max_score,
         "พบสมาชิกบางคนยังไม่มี commit (ตรวจจาก author email ใน git history)",
         "ให้สมาชิกทำ commit อย่างน้อย 1 ครั้ง แล้วตรวจว่า `git config user.email` ตรงกับ TEAM.md",
-        "missing emails: " + ", ".join(missing_emails),
+        f"อีเมลที่ยังไม่มี commit:\n{missing_list}",
     )
 
 
 # ✅ Backward import compatibility: __init__.py expects this name
 def evaluate_team_contribution(repo_path: Path) -> Tuple[int, int, str]:
     score, max_score, what, how, ev = _evaluate(repo_path)
-    # legacy single comment (ยังเก็บไว้)
-    comment = what
+    # legacy single comment (keep for older renderers)
+    comment = what or ""
     if ev:
-        comment += f" | บรรทัดที่ต้องแก้: {ev}"
+        comment += f" | Evidence: {ev}"
     if how:
         comment += f" | วิธีแก้: {how}"
+    if not comment:
+        comment = "ทุกคนมีอย่างน้อย 1 commit (ตรวจจาก author email ใน git history)"
     return (score, max_score, comment)
 
 
 def run(ctx: GradingContext) -> Dict[str, object]:
+    """
+    New-style item schema for render_summary.py (Job Summary + annotations).
+    """
     score, max_score, what, how, ev = _evaluate(ctx.repo_path)
-
     passed = (max_score <= 0) or (score >= max_score)
 
-    # policy: check นี้เป็น MAJOR (ไม่ทำให้ FAIL ถ้าคุณใช้เกณฑ์ “FAIL เฉพาะ BLOCKER”)
+    # Policy: MAJOR failure should show as failed but not necessarily flip overall status
     severity = "MAJOR" if not passed else "INFO"
 
     return {
@@ -169,10 +181,11 @@ def run(ctx: GradingContext) -> Dict[str, object]:
         "what_failed": "" if passed else what,
         "how_to_fix": "" if passed else how,
         "evidence": "" if passed else ev,
-        # keep legacy too
+        # Keep legacy too (optional)
         "comment": "" if passed else (what + (f" | วิธีแก้: {how}" if how else "") + (f" | {ev}" if ev else "")),
     }
 
 
 def check(ctx: GradingContext) -> Tuple[int, int, str]:
+    """Legacy adapter (if any runner still calls check())"""
     return evaluate_team_contribution(ctx.repo_path)
