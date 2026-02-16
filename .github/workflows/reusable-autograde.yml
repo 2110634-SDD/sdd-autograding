@@ -58,7 +58,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1) Checkout student repo (caller) at requested ref (tag/branch/sha)
       - name: Checkout student repository
         uses: actions/checkout@v4
         with:
@@ -74,14 +73,10 @@ jobs:
           echo "GITHUB_REF=${GITHUB_REF}"
           echo "GITHUB_REF_NAME=${GITHUB_REF_NAME}"
           echo "DEFAULT_BRANCH=${{ github.event.repository.default_branch }}"
-          echo "Student repo toplevel:"
           git rev-parse --show-toplevel || true
-          echo "HEAD:"
           git show -s --oneline --decorate HEAD || true
-          echo "Commit count:"
           git rev-list --count HEAD || true
 
-      # 2) Checkout autograder repo into subdir
       - name: Checkout autograder repository
         uses: actions/checkout@v4
         with:
@@ -90,19 +85,11 @@ jobs:
           path: sdd-autograding
           fetch-depth: 0
 
-      - name: Verify autograder checkout
-        shell: bash
-        run: |
-          echo "Listing sdd-autograding/ (top-level):"
-          ls -la sdd-autograding || true
-
-      # 3) Setup python (NO pip cache)
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python_version }}
 
-      # 4) Install dependencies (if any)
       - name: Install autograder dependencies
         shell: bash
         working-directory: sdd-autograding
@@ -115,7 +102,6 @@ jobs:
             echo "No requirements.txt in sdd-autograding; skipping pip install."
           fi
 
-      # 5) Run autograder
       - name: Run autograder
         shell: bash
         env:
@@ -129,7 +115,6 @@ jobs:
           echo "▶ GRADER_DEBUG=$GRADER_DEBUG"
           python -m grader.main
 
-      # 6) Verify results exist
       - name: Verify grading result
         shell: bash
         env:
@@ -145,7 +130,6 @@ jobs:
           echo "Found: $RESULT_PATH"
           sed -n '1,40p' "$RESULT_PATH"
 
-      # 7) Upload artifact
       - name: Upload grading artifact
         uses: actions/upload-artifact@v4
         with:
@@ -155,8 +139,7 @@ jobs:
             grading_result.json
           if-no-files-found: error
 
-      # 8) Optionally commit results back to student repo
-      # ✅ FIX: Even if we graded a tag (detached HEAD), we commit to DEFAULT_BRANCH
+      # ✅ FIXED: handle untracked result files before switching branches
       - name: Commit grading result to student repo (default branch)
         if: ${{ inputs.commit_results }}
         shell: bash
@@ -174,23 +157,28 @@ jobs:
           echo "Current HEAD:"
           git show -s --oneline --decorate HEAD || true
 
-          # copy results out to a safe place before switching branches
-          mkdir -p /tmp/grading_out
-          cp -f "$RESULT_PATH" "/tmp/grading_out/$(basename "$RESULT_PATH")"
-          if [ -f "$LEGACY_PATH" ]; then
-            cp -f "$LEGACY_PATH" "/tmp/grading_out/$(basename "$LEGACY_PATH")"
+          # Stash untracked files (results are often untracked when running on a tag / detached HEAD)
+          # This avoids: "untracked working tree files would be overwritten by checkout"
+          if [ -n "$(git status --porcelain)" ]; then
+            git stash push --include-untracked -m "autograde-results" || true
           fi
 
-          # switch to default branch
+          # Switch to default branch safely
           git fetch origin "${DEFAULT_BRANCH}:${DEFAULT_BRANCH}" || true
           git checkout "${DEFAULT_BRANCH}"
           git pull --ff-only origin "${DEFAULT_BRANCH}" || true
 
-          # restore results into working tree
+          # Restore stashed results (if any)
+          if git stash list | grep -q "autograde-results"; then
+            git stash pop || true
+          fi
+
+          # Ensure files exist in working tree (in case stash pop didn't apply due to conflicts)
+          # If missing, try to re-copy from current tree path (best effort, deterministic)
           mkdir -p "${RESULTS_DIR}"
-          cp -f "/tmp/grading_out/$(basename "$RESULT_PATH")" "$RESULT_PATH"
-          if [ -f "/tmp/grading_out/$(basename "$LEGACY_PATH")" ]; then
-            cp -f "/tmp/grading_out/$(basename "$LEGACY_PATH")" "$LEGACY_PATH"
+
+          if [ ! -f "$RESULT_PATH" ]; then
+            echo "::warning::Result file missing after stash pop: $RESULT_PATH"
           fi
 
           git config user.name  "autograder-bot"
