@@ -43,12 +43,7 @@ def parse_team_members(text: str):
     Returns empty list if no valid table is found.
     """
     lines = text.splitlines()
-
-    table_lines = [
-        line.strip()
-        for line in lines
-        if "|" in line
-    ]
+    table_lines = [line.strip() for line in lines if "|" in line]
 
     if len(table_lines) < 2:
         return []
@@ -59,7 +54,6 @@ def parse_team_members(text: str):
         cells = [c.strip() for c in line.strip("|").split("|")]
         normalized = [normalize_header(c) for c in cells]
 
-        # detect header row
         header_map = {
             idx: HEADER_ALIASES[n]
             for idx, n in enumerate(normalized)
@@ -67,10 +61,9 @@ def parse_team_members(text: str):
         }
 
         if len(header_map) >= 2:
-            # parse rows after header
-            for row in table_lines[i + 1:]:
+            for row in table_lines[i + 1 :]:
                 if re.match(r"^\|?\s*-+\s*\|", row):
-                    continue  # separator row
+                    continue
 
                 values = [c.strip() for c in row.strip("|").split("|")]
                 member = {}
@@ -83,7 +76,6 @@ def parse_team_members(text: str):
                 if is_valid_email(email):
                     member["email"] = email
                     members.append(member)
-
             break
 
     return members
@@ -121,10 +113,6 @@ def git_commit_emails(repo_path: Path, file_path=None, debug: bool = False):
     - If file_path is provided: only commits touching that file.
     - If file_path is None: whole repo history.
     Never raises. Returns empty set if git is unavailable.
-
-    NOTE: This is intentionally deterministic and minimal:
-    - Uses git toplevel to avoid wrong cwd.
-    - Provides limited debug info if enabled.
     """
     try:
         top = _git_toplevel(repo_path, debug=debug) or repo_path.resolve()
@@ -141,10 +129,8 @@ def git_commit_emails(repo_path: Path, file_path=None, debug: bool = False):
             if is_valid_email(e.strip())
         ]
 
-        # minimal debug output
         if debug:
             _dbg(f"git toplevel: {top}", debug)
-
             try:
                 c = _git(["git", "rev-list", "--count", "HEAD"], cwd=top, debug=debug)
                 _dbg(f"commit_count={c.stdout.strip()}", debug)
@@ -159,6 +145,50 @@ def git_commit_emails(repo_path: Path, file_path=None, debug: bool = False):
 
     except Exception as e:
         _dbg(f"git_commit_emails failed: {e}", debug)
+        return set()
+
+
+def git_tag_exists(repo_path: Path, tag: str, debug: bool = False) -> bool:
+    """
+    Check whether tag exists locally.
+    Never raises.
+    """
+    try:
+        top = _git_toplevel(repo_path, debug=debug) or repo_path.resolve()
+        _git(["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}"], cwd=top, debug=debug)
+        return True
+    except Exception as e:
+        _dbg(f"tag not found: {tag} ({e})", debug)
+        return False
+
+
+def git_commit_emails_range(repo_path: Path, rev_range: str, debug: bool = False):
+    """
+    Return set of commit author emails within a git revision range.
+    Example rev_range: 'M1..HEAD'
+    Never raises. Returns empty set if range invalid or git unavailable.
+    """
+    try:
+        top = _git_toplevel(repo_path, debug=debug) or repo_path.resolve()
+
+        result = _git(["git", "log", rev_range, "--pretty=%ae"], cwd=top, debug=debug)
+
+        emails = [
+            e.strip()
+            for e in result.stdout.splitlines()
+            if is_valid_email(e.strip())
+        ]
+
+        if debug:
+            uniq = sorted(set(emails))
+            _dbg(f"rev_range={rev_range}", debug)
+            _dbg(f"unique_emails_in_range={len(uniq)}", debug)
+            _dbg(f"emails_range_sample={', '.join(uniq[:10])}", debug)
+
+        return set(emails)
+
+    except Exception as e:
+        _dbg(f"git_commit_emails_range failed: {e}", debug)
         return set()
 
 
