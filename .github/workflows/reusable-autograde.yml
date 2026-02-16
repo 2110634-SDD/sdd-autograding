@@ -105,32 +105,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          FILE="$GITHUB_WORKSPACE/grading/grading_result_${{ inputs.milestone }}.json"
-          if [ ! -f "$FILE" ]; then
-            echo "No grading result file found at $FILE"
+          M="${{ inputs.milestone }}"
+          SRC_REL="grading/grading_result_${M}.json"
+          SRC_ABS="$GITHUB_WORKSPACE/$SRC_REL"
+          TMP="/tmp/grading_result_${M}.json"
+
+          if [ ! -f "$SRC_ABS" ]; then
+            echo "No grading result file found at $SRC_ABS"
             exit 0
           fi
+
+          # Save result to a temp location so branch checkout won't wipe it
+          cp -f "$SRC_ABS" "$TMP"
+          ls -la "$TMP"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
           echo "Default branch: $DEFAULT_BRANCH"
-
-          # Ensure we have the default branch locally
-          git fetch origin "$DEFAULT_BRANCH":"$DEFAULT_BRANCH"
-
-          # Switch to default branch and copy in the grading file
-          git checkout "$DEFAULT_BRANCH"
-          mkdir -p grading
-          cp -f "$FILE" "grading/grading_result_${{ inputs.milestone }}.json"
-
-          git add "grading/grading_result_${{ inputs.milestone }}.json"
-
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-            exit 0
-          fi
-
-          git commit -m "Add autograding result for ${{ inputs.milestone }} [skip ci]"
-          git push origin "$DEFAULT_BRANCH"
