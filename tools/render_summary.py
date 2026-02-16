@@ -6,7 +6,6 @@ import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-
 SEV_ORDER = {"BLOCKER": 0, "MAJOR": 1, "MINOR": 2, "INFO": 3, "UNKNOWN": 9}
 SEV_TO_ANNOT = {"BLOCKER": "error", "MAJOR": "warning", "MINOR": "notice", "INFO": "notice", "UNKNOWN": "warning"}
 
@@ -94,11 +93,37 @@ def _extract_checks(result: Dict[str, Any]) -> List[Dict[str, Any]]:
     return []
 
 
+def _fallback_fields_from_comment(c: Dict[str, Any]) -> Tuple[str, str, str]:
+    """
+    If schema is legacy (comment only), use comment as What failed,
+    and try extract How to fix / Evidence heuristically.
+    """
+    comment = _as_str(_get(c, "comment", default="")).strip()
+    if not comment:
+        return "", "", ""
+
+    what = comment
+    how = ""
+    ev = ""
+
+    if "วิธีแก้:" in comment:
+        before, after = comment.split("วิธีแก้:", 1)
+        what = before.strip(" |")
+        how = after.strip()
+
+    if "บรรทัดที่ต้องแก้:" in comment:
+        before, after = comment.split("บรรทัดที่ต้องแก้:", 1)
+        what = before.strip(" |")
+        ev = after.strip()
+
+    return what, how, ev
+
+
 def render(result: Dict[str, Any], milestone: str, submission_ref: str, submission_tag: str) -> Tuple[str, str]:
     checks = _extract_checks(result)
 
-    total_score = _get(result, "total_score", "score_total", default=None)
-    total_max = _get(result, "max_score", "score_max", "total_max", default=None)
+    total_score = _get(result, "total_score", "score_total", "total", default=None)
+    total_max = _get(result, "max_score", "score_max", "total_max", "max", default=None)
 
     try:
         total_score_f = float(total_score) if total_score is not None else None
@@ -109,6 +134,7 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
     except Exception:
         total_max_f = None
 
+    # derive if missing
     if total_score_f is None or total_max_f is None:
         ssum = 0.0
         msum = 0.0
@@ -128,18 +154,44 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
     sev_counts = {"BLOCKER": 0, "MAJOR": 0, "MINOR": 0, "INFO": 0, "UNKNOWN": 0}
 
     for c in checks:
-        sev = _norm_sev(_get(c, "severity", "level", default="UNKNOWN"))
-        sev_counts[sev] = sev_counts.get(sev, 0) + 1
+        # severity: if missing and failed, treat as MAJOR (avoid UNKNOWN leading to weird PASS)
+        sev_raw = _get(c, "severity", "level", default=None)
+        sev = _norm_sev(sev_raw) if sev_raw is not None else "UNKNOWN"
 
         pb = _status_bool(c)
+        s, m = _score_pair(c)
+
+        # if no explicit boolean, derive from score/max
+        if pb is None and s is not None and m is not None:
+            pb = (m <= 0) or (s >= m)
+
         if pb is True:
             passed_cnt += 1
+            if sev == "UNKNOWN":
+                sev = "INFO"
         elif pb is False:
+            if sev == "UNKNOWN":
+                sev = "MAJOR"
             failed.append(c)
         else:
-            s, m = _score_pair(c)
-            if s is not None and m is not None and s < m:
-                failed.append(c)
+            # no status and no usable scores → treat as failed UNKNOWN→MAJOR
+            if sev == "UNKNOWN":
+                sev = "MAJOR"
+            failed.append(c)
+
+        sev_counts[sev] = sev_counts.get(sev, 0) + 1
+        # write back normalized severity for consistent rendering/annotation
+        c["severity"] = sev
+
+        # legacy fallback: comment -> what/how/evidence
+        if not _get(c, "what_failed", "message", "summary", default=""):
+            what, how, ev = _fallback_fields_from_comment(c)
+            if what:
+                c["what_failed"] = what
+            if how and not _get(c, "how_to_fix", "fix", "hint", default=""):
+                c["how_to_fix"] = how
+            if ev and not _get(c, "evidence", "evidences", default=""):
+                c["evidence"] = ev
 
     def _sort_key(c: Dict[str, Any]):
         sev = _norm_sev(_get(c, "severity", "level", default="UNKNOWN"))
@@ -148,6 +200,7 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
 
     failed.sort(key=_sort_key)
 
+    # overall: FAIL if any BLOCKER failed; else PASS
     explicit_status = _as_str(_get(result, "status", "result", default="")).upper()
     if explicit_status in ("PASS", "PASSED", "OK", "SUCCESS"):
         overall = "PASS"
@@ -188,7 +241,7 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
             cid = _as_str(_get(c, "id", "check_id", "code", default="(no id)"))
             title = _as_str(_get(c, "title", "name", default="")).strip()
             sev = _norm_sev(_get(c, "severity", "level", default="UNKNOWN"))
-            what = _as_str(_get(c, "what_failed", "message", "summary", default="")).strip()
+            what = _as_str(_get(c, "what_failed", "message", "summary", "comment", default="")).strip()
             how = _as_str(_get(c, "how_to_fix", "fix", "hint", default="")).strip()
             label = f"**{cid}**"
             if title:
@@ -216,7 +269,7 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
                 score_cell = f"{int(s)}"
             else:
                 score_cell = ""
-            what = _as_str(_get(c, "what_failed", "message", "summary", default="")).replace("\n", " ").strip()
+            what = _as_str(_get(c, "what_failed", "message", "summary", "comment", default="")).replace("\n", " ").strip()
             how = _as_str(_get(c, "how_to_fix", "fix", "hint", default="")).replace("\n", " ").strip()
             ev = _get(c, "evidence", "evidences", default="")
             ev0 = ev[0] if isinstance(ev, list) and ev else ev
@@ -241,7 +294,7 @@ def render(result: Dict[str, Any], milestone: str, submission_ref: str, submissi
         cid = _as_str(_get(c, "id", "check_id", "code", default="(no id)"))
         title = _as_str(_get(c, "title", "name", default="")).strip()
 
-        what = _as_str(_get(c, "what_failed", "message", "summary", default="Check failed")).strip()
+        what = _as_str(_get(c, "what_failed", "message", "summary", "comment", default="Check failed")).strip()
         how = _as_str(_get(c, "how_to_fix", "fix", "hint", default="")).strip()
 
         msg = f"[{cid}] {title + ' — ' if title else ''}{what}"
