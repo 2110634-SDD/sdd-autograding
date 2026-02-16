@@ -8,7 +8,7 @@ on:
         required: true
         type: string
 
-      # ✅ เพิ่ม: ref ของ student repo ที่จะ grade (tag/branch/sha)
+      # ✅ ref ของ student repo ที่จะ grade (tag/branch/sha) — ใช้ตอนทดสอบ tag เก่า เช่น M0
       student_ref:
         description: "Git ref of student repo to grade (tag/branch/sha)"
         required: false
@@ -25,21 +25,25 @@ on:
         required: false
         type: string
         default: "main"
+
       python_version:
         description: "Python version"
         required: false
         type: string
         default: "3.11"
+
       debug:
         description: "เปิด debug logging (true/false)"
         required: false
         type: boolean
         default: false
+
       commit_results:
         description: "commit grading result กลับเข้า repo ของนิสิต (true/false)"
         required: false
         type: boolean
         default: false
+
       results_dir:
         description: "โฟลเดอร์ผลลัพธ์ใน student repo"
         required: false
@@ -61,10 +65,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-          # ✅ ถ้ามี student_ref ให้ checkout ที่ ref นั้น (เช่น tag M0)
           ref: ${{ inputs.student_ref != '' && inputs.student_ref || github.ref }}
 
-      - name: Show workspace info
+      - name: Show student repo info
         shell: bash
         run: |
           echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
@@ -72,12 +75,12 @@ jobs:
           echo "GITHUB_REF=${GITHUB_REF}"
           echo "GITHUB_REF_NAME=${GITHUB_REF_NAME}"
           echo "DEFAULT_BRANCH=${{ github.event.repository.default_branch }}"
+          echo "Student repo toplevel:"
           git rev-parse --show-toplevel || true
-          git rev-list --count HEAD || true
-          echo "HEAD SHA:"
-          git rev-parse HEAD || true
-          echo "Current ref:"
+          echo "HEAD:"
           git show -s --oneline --decorate HEAD || true
+          echo "Commit count:"
+          git rev-list --count HEAD || true
 
       # 2) Checkout autograder repo into subdir
       - name: Checkout autograder repository
@@ -88,17 +91,19 @@ jobs:
           path: sdd-autograding
           fetch-depth: 0
 
-      # 3) Setup python
+      - name: Verify autograder checkout
+        shell: bash
+        run: |
+          echo "Listing sdd-autograding/ (top-level):"
+          ls -la sdd-autograding || true
+          echo "Find common dependency files (may be none; that's OK):"
+          find sdd-autograding -maxdepth 3 -type f \( -name "requirements.txt" -o -name "pyproject.toml" -o -name "poetry.lock" -o -name "setup.cfg" \) -print || true
+
+      # 3) Setup python (✅ NO pip cache to avoid dependency-file mismatch errors)
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python_version }}
-          cache: pip
-          cache-dependency-path: |
-            sdd-autograding/requirements.txt
-            sdd-autograding/pyproject.toml
-            sdd-autograding/poetry.lock
-            sdd-autograding/setup.cfg
 
       # 4) Install dependencies (if any)
       - name: Install autograder dependencies
@@ -109,6 +114,8 @@ jobs:
           pip -V
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
+          else
+            echo "No requirements.txt in sdd-autograding; skipping pip install."
           fi
 
       # 5) Run autograder
@@ -116,6 +123,7 @@ jobs:
         shell: bash
         env:
           MILESTONE: ${{ inputs.milestone }}
+          # สำคัญ: ให้ context.py ใช้ student repo เสมอ แม้ cd ไป sdd-autograding
           STUDENT_REPO_PATH: ${{ github.workspace }}
           GRADER_DEBUG: ${{ inputs.debug && '1' || '0' }}
         working-directory: sdd-autograding
@@ -133,7 +141,9 @@ jobs:
           RESULTS_DIR: ${{ inputs.results_dir }}
         run: |
           echo "▶ Checking result files in student repo"
+          echo "Workspace root:"
           ls -la
+
           echo "▶ ${RESULTS_DIR}/"
           ls -la "${RESULTS_DIR}" || true
 
@@ -141,13 +151,13 @@ jobs:
           if [ ! -f "$RESULT_PATH" ]; then
             echo "::error::Missing result file: $RESULT_PATH"
             echo "Search possible result files:"
-            find . -maxdepth 3 -type f -name "grading_result*.json" -print
+            find . -maxdepth 4 -type f -name "grading_result*.json" -print
             exit 1
           fi
 
           echo "Found: $RESULT_PATH"
-          echo "Preview (first 60 lines):"
-          sed -n '1,60p' "$RESULT_PATH"
+          echo "Preview (first 80 lines):"
+          sed -n '1,80p' "$RESULT_PATH"
 
       # 7) Upload artifact
       - name: Upload grading artifact
@@ -168,7 +178,9 @@ jobs:
           RESULTS_DIR: ${{ inputs.results_dir }}
         run: |
           set -e
+
           RESULT_PATH="${RESULTS_DIR}/grading_result_${MILESTONE}.json"
+          echo "▶ Preparing to commit: $RESULT_PATH"
 
           git config user.name  "autograder-bot"
           git config user.email "autograder-bot@users.noreply.github.com"
