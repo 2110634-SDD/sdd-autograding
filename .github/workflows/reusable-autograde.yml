@@ -19,6 +19,7 @@ on:
         required: false
         type: string
         default: "2110634-SDD/sdd-autograding"
+
       autograder_ref:
         description: "ref ของ grading repo (branch/tag/sha)"
         required: false
@@ -37,8 +38,9 @@ on:
         type: boolean
         default: false
 
+      # Deprecated (kept for backward compatibility). This workflow will NOT commit results anymore.
       commit_results:
-        description: "commit grading result กลับเข้า repo ของนิสิต (true/false)"
+        description: "[DEPRECATED] commit grading result กลับเข้า repo ของนิสิต (true/false)"
         required: false
         type: boolean
         default: false
@@ -50,7 +52,7 @@ on:
         default: "grading"
 
 permissions:
-  contents: write
+  contents: read
   actions: read
 
 jobs:
@@ -58,13 +60,47 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Resolve submission ref/tag
+        id: subref
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REF_INPUT="${{ inputs.student_ref }}"
+          GH_REF="${GITHUB_REF:-}"
+          GH_REF_NAME="${GITHUB_REF_NAME:-}"
+
+          RESOLVED_REF=""
+          SUBMISSION_TAG=""
+
+          if [ -n "$REF_INPUT" ]; then
+            RESOLVED_REF="$REF_INPUT"
+            case "$REF_INPUT" in
+              v*|V*) SUBMISSION_TAG="$REF_INPUT" ;;
+              *) SUBMISSION_TAG="" ;;
+            esac
+          else
+            if [[ "$GH_REF" == refs/tags/* ]] && [ -n "$GH_REF_NAME" ]; then
+              RESOLVED_REF="$GH_REF_NAME"
+              SUBMISSION_TAG="$GH_REF_NAME"
+            else
+              RESOLVED_REF="${GITHUB_SHA}"
+              SUBMISSION_TAG=""
+            fi
+          fi
+
+          echo "resolved_ref=$RESOLVED_REF" >> "$GITHUB_OUTPUT"
+          echo "submission_tag=$SUBMISSION_TAG" >> "$GITHUB_OUTPUT"
+
+          echo "▶ RESOLVED_REF=$RESOLVED_REF"
+          echo "▶ SUBMISSION_TAG=$SUBMISSION_TAG"
+
       - name: Checkout student repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: true
-          # ✅ Prefer explicit ref from caller; otherwise use the triggering SHA (deterministic for workflow_call)
-          ref: ${{ inputs.student_ref != '' && inputs.student_ref || github.sha }}
+          persist-credentials: false
+          ref: ${{ steps.subref.outputs.resolved_ref }}
 
       - name: Show student repo info
         shell: bash
@@ -109,15 +145,18 @@ jobs:
         shell: bash
         env:
           MILESTONE: ${{ inputs.milestone }}
-          # ✅ Used by GradingContext.from_env() to grade the student repo even when running inside sdd-autograding/
           STUDENT_REPO_PATH: ${{ github.workspace }}
           GRADER_DEBUG: ${{ inputs.debug && '1' || '0' }}
+          SUBMISSION_REF: ${{ steps.subref.outputs.resolved_ref }}
+          SUBMISSION_TAG: ${{ steps.subref.outputs.submission_tag }}
         working-directory: sdd-autograding
         run: |
           set -euo pipefail
           echo "▶ MILESTONE=$MILESTONE"
           echo "▶ STUDENT_REPO_PATH=$STUDENT_REPO_PATH"
           echo "▶ GRADER_DEBUG=$GRADER_DEBUG"
+          echo "▶ SUBMISSION_REF=$SUBMISSION_REF"
+          echo "▶ SUBMISSION_TAG=$SUBMISSION_TAG"
           python -m grader.main
 
       - name: Verify grading result
@@ -135,7 +174,35 @@ jobs:
             exit 1
           fi
           echo "Found: $RESULT_PATH"
-          sed -n '1,80p' "$RESULT_PATH"
+          sed -n '1,120p' "$RESULT_PATH"
+
+      - name: Render human-friendly summary + annotations
+        shell: bash
+        env:
+          MILESTONE: ${{ inputs.milestone }}
+          RESULTS_DIR: ${{ inputs.results_dir }}
+          SUBMISSION_REF: ${{ steps.subref.outputs.resolved_ref }}
+          SUBMISSION_TAG: ${{ steps.subref.outputs.submission_tag }}
+        run: |
+          set -euo pipefail
+          RESULT_PATH="${RESULTS_DIR}/grading_result_${MILESTONE}.json"
+          SUMMARY_MD="${RESULTS_DIR}/summary_${MILESTONE}.md"
+          ANNO_TXT="${RESULTS_DIR}/annotations_${MILESTONE}.txt"
+
+          python sdd-autograding/tools/render_summary.py \
+            --result "$RESULT_PATH" \
+            --milestone "$MILESTONE" \
+            --submission-ref "${SUBMISSION_REF}" \
+            --submission-tag "${SUBMISSION_TAG}" \
+            --summary-out "$SUMMARY_MD" \
+            --annotations-out "$ANNO_TXT"
+
+          echo "---- Job Summary (Markdown) ----"
+          cat "$SUMMARY_MD" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "---- GitHub Annotations ----"
+          # annotations lines already contain ::error/::warning/::notice format
+          cat "$ANNO_TXT"
 
       - name: Upload grading artifact
         uses: actions/upload-artifact@v4
@@ -143,72 +210,10 @@ jobs:
           name: grading_result_${{ inputs.milestone }}
           path: |
             ${{ inputs.results_dir }}/grading_result_${{ inputs.milestone }}.json
-            grading_result.json
+            ${{ inputs.results_dir }}/summary_${{ inputs.milestone }}.md
+            ${{ inputs.results_dir }}/annotations_${{ inputs.milestone }}.txt
           if-no-files-found: error
 
-      - name: Commit grading result to student repo (default branch)
-        if: ${{ inputs.commit_results }}
-        shell: bash
-        env:
-          MILESTONE: ${{ inputs.milestone }}
-          RESULTS_DIR: ${{ inputs.results_dir }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-
-          RESULT_PATH="${RESULTS_DIR}/grading_result_${MILESTONE}.json"
-          LEGACY_PATH="grading_result.json"
-
-          if [ ! -f "$RESULT_PATH" ]; then
-            echo "::warning::Result file missing, skip commit: $RESULT_PATH"
-            exit 0
-          fi
-
-          echo "▶ Preparing to commit results to default branch: ${DEFAULT_BRANCH}"
-          echo "Current HEAD:"
-          git show -s --oneline --decorate HEAD || true
-
-          # 1) Move results out of the working tree (avoids 'untracked would be overwritten by checkout')
-          TMP_DIR="/tmp/autograde-results"
-          mkdir -p "$TMP_DIR"
-
-          cp -f "$RESULT_PATH" "$TMP_DIR/$(basename "$RESULT_PATH")"
-          if [ -f "$LEGACY_PATH" ]; then
-            cp -f "$LEGACY_PATH" "$TMP_DIR/$(basename "$LEGACY_PATH")"
-          fi
-
-          # Remove from working tree so checkout won't complain
-          rm -f "$RESULT_PATH" "$LEGACY_PATH" || true
-
-          # If grading/ becomes empty, that's fine
-          rmdir "$RESULTS_DIR" 2>/dev/null || true
-
-          # 2) Checkout default branch
-          git fetch origin "${DEFAULT_BRANCH}:${DEFAULT_BRANCH}" || true
-          git checkout "${DEFAULT_BRANCH}"
-          git pull --ff-only origin "${DEFAULT_BRANCH}" || true
-
-          # 3) Restore files into the default branch working tree
-          mkdir -p "${RESULTS_DIR}"
-          cp -f "$TMP_DIR/$(basename "$RESULT_PATH")" "$RESULT_PATH"
-          if [ -f "$TMP_DIR/$(basename "$LEGACY_PATH")" ]; then
-            cp -f "$TMP_DIR/$(basename "$LEGACY_PATH")" "$LEGACY_PATH"
-          fi
-
-          # 4) Commit & push
-          git config user.name  "autograder-bot"
-          git config user.email "autograder-bot@users.noreply.github.com"
-
-          git add "$RESULT_PATH" "$LEGACY_PATH" || true
-
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-            exit 0
-          fi
-
-          git commit -m "chore(autograde): add grading result for ${MILESTONE} [skip ci]"
-          git push origin "${DEFAULT_BRANCH}"
-          
       - name: Done
         shell: bash
         run: |

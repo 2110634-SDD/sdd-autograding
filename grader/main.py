@@ -5,12 +5,29 @@ from grader.checks.m0 import (
     commit_contribution,
 )
 
+from grader.checks.m1 import (
+    instructions_exists,
+    instructions_anchors,
+    manifest_core,
+    readme_overview_filled,
+    summary_minimums,
+    uc_package,
+)
+
 # Mapping per milestone เพื่อรองรับอนาคต
 CHECKSETS = {
     "M0": [
         ("team_file.exists", team_file_exists),
         ("team_file.content", team_file_content),
         ("commit.contribution", commit_contribution),
+    ],
+    "M1": [
+        ("m1.contract.exists", instructions_exists),
+        ("m1.contract.anchors", instructions_anchors),
+        ("m1.manifest.core", manifest_core),
+        ("m1.readme.overview", readme_overview_filled),
+        ("m1.summary.minimums", summary_minimums),
+        ("m1.uc.package", uc_package),
     ],
 }
 
