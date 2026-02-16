@@ -63,19 +63,51 @@ jobs:
           # Checkout the tagged submission (usually detached HEAD)
           git checkout "tags/$TAG"
 
-          # Run autograder (grading repo code)
-          cd sdd-autograding
-          python -m grader.main || true
-
-          # Normalize output location in the student workspace
+          # Ensure destination folder exists in student workspace
           mkdir -p "$GITHUB_WORKSPACE/grading"
-          SRC="$GITHUB_WORKSPACE/sdd-autograding/grading_result.json"
           DST="$GITHUB_WORKSPACE/grading/grading_result_${MILESTONE}.json"
 
-          test -f "$SRC"
-          cp -f "$SRC" "$DST"
-          ls -la "$DST"
+          # Run autograder (grading repo code)
+          # NOTE: grader runs under sdd-autograding/ so its default output is inside that folder
+          cd sdd-autograding
+          python -m grader.main || true
+          cd "$GITHUB_WORKSPACE"
 
+          # Possible result locations (depending on your grader/core/context.py version)
+          CANDIDATES=(
+            "$GITHUB_WORKSPACE/grading/grading_result_${MILESTONE}.json"
+            "$GITHUB_WORKSPACE/sdd-autograding/grading/grading_result_${MILESTONE}.json"
+            "$GITHUB_WORKSPACE/sdd-autograding/grading_result.json"
+          )
+
+          SRC=""
+          for f in "${CANDIDATES[@]}"; do
+            if [ -f "$f" ]; then
+              SRC="$f"
+              break
+            fi
+          done
+
+          if [ -z "$SRC" ]; then
+            echo "[ERROR] No grading result found. Checked:"
+            printf ' - %s\n' "${CANDIDATES[@]}"
+            exit 1
+          fi
+
+          echo "Found result at: $SRC"
+          echo "Normalizing to:  $DST"
+
+          # Copy only if SRC and DST are not the same file
+          SRC_REAL="$(realpath -m "$SRC")"
+          DST_REAL="$(realpath -m "$DST")"
+          if [ "$SRC_REAL" = "$DST_REAL" ]; then
+            echo "Skip copy: SRC and DST are the same file: $SRC_REAL"
+          else
+            cp -f "$SRC" "$DST"
+          fi
+
+          ls -la "$DST"
+          
       - name: Debug locate grading_result.json
         if: always()
         shell: bash
