@@ -55,7 +55,7 @@ def _parse_expected_members(team_md: Path) -> List[ExpectedMember]:
         email = emails[0].lower() if emails else None
         out.append(ExpectedMember(raw_line=s, email=email))
 
-    # dedup by (email, raw_line)
+    # dedup
     seen = set()
     uniq: List[ExpectedMember] = []
     for m in out:
@@ -113,7 +113,6 @@ def _evaluate(repo_path: Path) -> Tuple[int, int, str]:
     if not missing_emails:
         return (max_score, max_score, "ทุกคนมีอย่างน้อย 1 commit (ตรวจจาก author email ใน git history)")
 
-    # scoring: each missing email costs 3 points (cap at 0)
     score = max(0, max_score - len(missing_emails) * 3)
     return (
         score,
@@ -122,6 +121,11 @@ def _evaluate(repo_path: Path) -> Tuple[int, int, str]:
         + ", ".join(missing_emails)
         + " | วิธีแก้: ให้สมาชิกทำ commit อย่างน้อย 1 ครั้ง และตรวจว่า git user.email ตรงกับ TEAM.md",
     )
+
+
+# ✅ Backward import compatibility: __init__.py expects this name
+def evaluate_team_contribution(repo_path: Path) -> Tuple[int, int, str]:
+    return _evaluate(repo_path)
 
 
 # Runner adapters
