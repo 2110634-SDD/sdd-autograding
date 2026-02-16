@@ -12,6 +12,10 @@ on:
         required: false
         type: string
 
+# Required to commit/push grading results back to the student repository
+permissions:
+  contents: write
+
 jobs:
   autograde:
     runs-on: ubuntu-22.04
@@ -24,11 +28,13 @@ jobs:
 
       - name: Determine tag
         id: vars
+        shell: bash
         run: |
+          set -euo pipefail
           if [ -z "${{ inputs.tag }}" ]; then
-            echo "TAG=${{ inputs.milestone }}" >> $GITHUB_OUTPUT
+            echo "TAG=${{ inputs.milestone }}" >> "$GITHUB_OUTPUT"
           else
-            echo "TAG=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+            echo "TAG=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Checkout grading logic
@@ -47,21 +53,21 @@ jobs:
         env:
           MILESTONE: ${{ inputs.milestone }}
           TAG: ${{ steps.vars.outputs.TAG }}
+        shell: bash
         run: |
           set -euxo pipefail
 
           echo "▶ Grading milestone: $MILESTONE"
           echo "▶ Using tag: $TAG"
 
+          # Checkout the tagged submission (usually detached HEAD)
           git checkout "tags/$TAG"
 
+          # Run autograder (grading repo code)
           cd sdd-autograding
-          
-          python -m grader.main \
-            --milestone "$MILESTONE" \
-            --repo-path "$GITHUB_WORKSPACE" \
-            --output "$GITHUB_WORKSPACE/grading/grading_result_${MILESTONE}.json" || true
+          python -m grader.main || true
 
+          # Normalize output location in the student workspace
           mkdir -p "$GITHUB_WORKSPACE/grading"
           SRC="$GITHUB_WORKSPACE/sdd-autograding/grading_result.json"
           DST="$GITHUB_WORKSPACE/grading/grading_result_${MILESTONE}.json"
@@ -70,9 +76,11 @@ jobs:
           cp -f "$SRC" "$DST"
           ls -la "$DST"
 
-      - name: Debug  locate grading_result.json
+      - name: Debug locate grading_result.json
         if: always()
+        shell: bash
         run: |
+          set -euxo pipefail
           echo "PWD=$(pwd)"
           echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
           echo "---- find grading_result.json ----"
@@ -81,10 +89,48 @@ jobs:
           ls -la "$GITHUB_WORKSPACE" || true
           echo "---- list sdd-autograding ----"
           ls -la "$GITHUB_WORKSPACE/sdd-autograding" || true
+          echo "---- list grading ----"
+          ls -la "$GITHUB_WORKSPACE/grading" || true
 
-      - name: Upload grading result
+      - name: Upload grading result artifact
         uses: actions/upload-artifact@v4
         with:
           name: grading-result-${{ inputs.milestone }}
           path: grading/grading_result_${{ inputs.milestone }}.json
           if-no-files-found: error
+
+      - name: Commit grading result into student repo
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="$GITHUB_WORKSPACE/grading/grading_result_${{ inputs.milestone }}.json"
+          if [ ! -f "$FILE" ]; then
+            echo "No grading result file found at $FILE"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
+          echo "Default branch: $DEFAULT_BRANCH"
+
+          # Ensure we have the default branch locally
+          git fetch origin "$DEFAULT_BRANCH":"$DEFAULT_BRANCH"
+
+          # Switch to default branch and copy in the grading file
+          git checkout "$DEFAULT_BRANCH"
+          mkdir -p grading
+          cp -f "$FILE" "grading/grading_result_${{ inputs.milestone }}.json"
+
+          git add "grading/grading_result_${{ inputs.milestone }}.json"
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Add autograding result for ${{ inputs.milestone }} [skip ci]"
+          git push origin "$DEFAULT_BRANCH"
