@@ -168,26 +168,34 @@ jobs:
           echo "Current HEAD:"
           git show -s --oneline --decorate HEAD || true
 
-          # Save results to temp to survive branch checkout (tag/detached-head safe)
-          TMP_DIR="/tmp/autograde"
+          # 1) Move results out of the working tree (avoids 'untracked would be overwritten by checkout')
+          TMP_DIR="/tmp/autograde-results"
           mkdir -p "$TMP_DIR"
+
           cp -f "$RESULT_PATH" "$TMP_DIR/$(basename "$RESULT_PATH")"
           if [ -f "$LEGACY_PATH" ]; then
             cp -f "$LEGACY_PATH" "$TMP_DIR/$(basename "$LEGACY_PATH")"
           fi
 
-          # Switch to default branch safely
+          # Remove from working tree so checkout won't complain
+          rm -f "$RESULT_PATH" "$LEGACY_PATH" || true
+
+          # If grading/ becomes empty, that's fine
+          rmdir "$RESULTS_DIR" 2>/dev/null || true
+
+          # 2) Checkout default branch
           git fetch origin "${DEFAULT_BRANCH}:${DEFAULT_BRANCH}" || true
           git checkout "${DEFAULT_BRANCH}"
           git pull --ff-only origin "${DEFAULT_BRANCH}" || true
 
-          # Restore results into working tree
+          # 3) Restore files into the default branch working tree
           mkdir -p "${RESULTS_DIR}"
           cp -f "$TMP_DIR/$(basename "$RESULT_PATH")" "$RESULT_PATH"
           if [ -f "$TMP_DIR/$(basename "$LEGACY_PATH")" ]; then
             cp -f "$TMP_DIR/$(basename "$LEGACY_PATH")" "$LEGACY_PATH"
           fi
 
+          # 4) Commit & push
           git config user.name  "autograder-bot"
           git config user.email "autograder-bot@users.noreply.github.com"
 
@@ -198,9 +206,9 @@ jobs:
             exit 0
           fi
 
-          git commit -m "chore(autograde): add grading result for ${MILESTONE} [skip ci]" || true
+          git commit -m "chore(autograde): add grading result for ${MILESTONE} [skip ci]"
           git push origin "${DEFAULT_BRANCH}"
-
+          
       - name: Done
         shell: bash
         run: |
