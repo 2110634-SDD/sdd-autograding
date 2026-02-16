@@ -94,6 +94,11 @@ jobs:
         with:
           python-version: ${{ inputs.python_version }}
           cache: pip
+          cache-dependency-path: |
+            sdd-autograding/requirements.txt
+            sdd-autograding/pyproject.toml
+            sdd-autograding/poetry.lock
+            sdd-autograding/setup.cfg
 
       # 4) Install dependencies (if any)
       - name: Install autograder dependencies
