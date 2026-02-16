@@ -1,138 +1,170 @@
+# grader/checks/m0/commit_contribution.py
+from __future__ import annotations
+
 import re
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
 
-from grader.utils import (
-    read_team_file,
-    parse_team_members,
-    git_commit_emails,
-    git_commit_emails_range,
-    git_tag_exists,
-)
+from grader.core.context import GradingContext
 
 
-def _matches_github_noreply(commit_email: str, github_username: str) -> bool:
-    """
-    Match GitHub noreply formats:
-    - user@users.noreply.github.com
-    - 12345+user@users.noreply.github.com
-    """
-    u = re.escape(github_username.strip())
-    pattern = rf"^(?:\d+\+)?{u}@users\.noreply\.github\.com$"
-    return re.match(pattern, commit_email.strip(), re.IGNORECASE) is not None
+EMAIL_RE = re.compile(r"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})")
+GHUSER_RE = re.compile(r"@([A-Za-z0-9\-]{1,39})")  # simplified GitHub username regex
 
 
-def _range_for_milestone(milestone: str) -> str | None:
-    """
-    Commit range policy:
-    - M2: only commits after tag M1 => 'M1..HEAD'
-    - M3: only commits after tag M2 => 'M2..HEAD'
-    """
-    if milestone == "M2":
-        return "M1..HEAD"
-    if milestone == "M3":
-        return "M2..HEAD"
-    return None
+@dataclass(frozen=True)
+class ExpectedIdentity:
+    raw_line: str
+    email: Optional[str]
+    github: Optional[str]
 
 
-def _base_tag_for_range(rev_range: str) -> str | None:
-    # 'M1..HEAD' -> 'M1'
-    if ".." in rev_range:
-        return rev_range.split("..", 1)[0]
-    return None
+def _run_git(repo: Path, args: List[str]) -> str:
+    p = subprocess.run(
+        ["git"] + args,
+        cwd=str(repo),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if p.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} failed: {p.stderr.strip()}")
+    return p.stdout
 
 
-def run(ctx):
-    max_score = 8
-    debug = getattr(ctx, "debug", False)
-    milestone = getattr(ctx, "milestone", "")
+def parse_expected_identities(team_md: Path) -> List[ExpectedIdentity]:
+    if not team_md.exists():
+        return []
 
-    try:
-        text = read_team_file(ctx)
-    except FileNotFoundError:
-        return 0, max_score, "ไม่พบไฟล์ TEAM.md"
+    lines = team_md.read_text(encoding="utf-8", errors="replace").splitlines()
+    out: List[ExpectedIdentity] = []
+    for ln in lines:
+        ln_strip = ln.strip()
+        if not ln_strip:
+            continue
 
-    members = parse_team_members(text)
-    if not members:
-        return 0, max_score, (
-            "ไม่สามารถตรวจสอบ commit ได้ "
-            "(ไม่พบข้อมูลสมาชิกในตาราง Team Members)"
+        emails = EMAIL_RE.findall(ln_strip)
+        ghusers = GHUSER_RE.findall(ln_strip)
+
+        email = emails[0].lower() if emails else None
+        github = ghusers[0].lower() if ghusers else None
+
+        looks_memberish = (
+            ln_strip.startswith(("-", "*")) or "|" in ln_strip or re.match(r"^\d+[\).\s]", ln_strip) is not None
         )
 
-    note = ""
-    rev_range = _range_for_milestone(milestone)
+        if (email or github) and (looks_memberish or True):
+            out.append(ExpectedIdentity(raw_line=ln_strip, email=email, github=github))
 
-    if milestone == "M0":
-        # M0: only commits touching TEAM.md
-        commit_emails = git_commit_emails(
-            ctx.repo_path,
-            file_path="TEAM.md",
-            debug=debug,
-        )
-        note = " (ตรวจเฉพาะ commit ที่แตะไฟล์ TEAM.md)"
+    # Dedup
+    seen: Set[Tuple[Optional[str], Optional[str]]] = set()
+    uniq: List[ExpectedIdentity] = []
+    for x in out:
+        key = (x.email, x.github)
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(x)
+    return uniq
 
-    elif rev_range is not None:
-        # M2/M3: only commits in the range after previous milestone tag
-        base_tag = _base_tag_for_range(rev_range)
-        if base_tag and not git_tag_exists(ctx.repo_path, base_tag, debug=debug):
-            return (
-                0,
-                max_score,
-                (
-                    f"ไม่พบ tag '{base_tag}' ใน repository จึงไม่สามารถตรวจ commit หลัง {base_tag} ได้ "
-                    f"(ต้องมี tag '{base_tag}' ก่อนสำหรับการตรวจ milestone {milestone})"
-                ),
-            )
 
-        commit_emails = git_commit_emails_range(ctx.repo_path, rev_range, debug=debug)
-        note = f" (ตรวจเฉพาะ commit ช่วง: {rev_range})"
+def get_contributor_emails(repo: Path) -> Set[str]:
+    raw = _run_git(repo, ["log", "--all", "--format=%ae"])
+    emails = set()
+    for line in raw.splitlines():
+        e = line.strip().lower()
+        if e and "@" in e:
+            emails.add(e)
+    return emails
 
-    else:
-        # default safe behavior (should not be used if you exclude this check from other milestones)
-        commit_emails = git_commit_emails(ctx.repo_path, file_path=None, debug=debug)
-        note = " (ตรวจ commit ทั้ง repository)"
 
-    if not commit_emails:
-        return 0, max_score, (
-            "ไม่พบ commit ใด ๆ ที่ใช้ตรวจสอบได้ "
-            "(กรุณาให้สมาชิกแต่ละคน commit อย่างน้อย 1 ครั้งตามเงื่อนไข)"
-            + note
-        )
+def evaluate_team_contribution(repo_path: Path) -> Dict:
+    """
+    Main implementation: returns an item dict to be placed into result.items/checks.
+    """
+    team_md = repo_path / "TEAM.md"
+    expected = parse_expected_identities(team_md)
 
-    missing = []
-    for m in members:
-        expected_email = (m.get("email") or "").strip()
-        github = (m.get("github") or "").strip()
+    max_score = 6
 
-        ok = False
+    if not team_md.exists():
+        return {
+            "id": "M0.CONTRIB.01",
+            "title": "Team members have at least one commit",
+            "severity": "BLOCKER",
+            "score": 0,
+            "max_score": max_score,
+            "passed": False,
+            "what_failed": "ไม่พบไฟล์ TEAM.md จึงไม่สามารถตรวจการมีส่วนร่วมของสมาชิกได้",
+            "how_to_fix": "สร้าง TEAM.md ที่ root ของ repo และใส่รายชื่อสมาชิก (แนะนำใส่ email หรือ @github) แล้วส่งใหม่",
+            "evidence": {"path": "TEAM.md"},
+        }
 
-        # 1) exact email match is the primary criterion
-        if expected_email and expected_email in commit_emails:
-            ok = True
+    contrib_emails = get_contributor_emails(repo_path)
+
+    if not expected:
+        return {
+            "id": "M0.CONTRIB.01",
+            "title": "Team members have at least one commit",
+            "severity": "MAJOR",
+            "score": 0,
+            "max_score": max_score,
+            "passed": False,
+            "what_failed": "TEAM.md มีอยู่ แต่ไม่พบ email/@github ของสมาชิกในรูปแบบที่ระบบอ่านได้",
+            "how_to_fix": "แก้ TEAM.md ให้แต่ละสมาชิกมีอย่างน้อยหนึ่งอย่าง: email (เช่น name@domain) หรือ @github (แนะนำใส่ email เพื่อให้ตรวจ match ได้ชัด)",
+            "evidence": {"path": "TEAM.md"},
+        }
+
+    missing_emails: List[str] = []
+    has_non_email_entries = False
+
+    for ex in expected:
+        if ex.email:
+            if ex.email not in contrib_emails:
+                missing_emails.append(ex.email)
         else:
-            # 2) allow GitHub noreply match if GitHub username is provided
-            if github:
-                ok = any(_matches_github_noreply(e, github) for e in commit_emails)
+            # We cannot reliably map @github -> commit without API; encourage email.
+            has_non_email_entries = True
 
-        if not ok:
-            if expected_email:
-                missing.append(expected_email)
-            elif github:
-                missing.append(f"{github}@users.noreply.github.com")
-            else:
-                missing.append("<unknown member>")
+    passed = len(missing_emails) == 0
 
-    if missing:
-        penalty_per_member = 2
-        penalty = len(missing) * penalty_per_member
-        score = max(0, max_score - penalty)
-        return (
-            score,
-            max_score,
-            (
-                "ไม่พบ commit จากสมาชิกบางคน "
-                f"(หัก {penalty_per_member} คะแนนต่อคน): "
-                + ", ".join(missing)
-                + note
-            ),
-        )
+    # scoring: each missing email costs 3 points (cap at 0)
+    score = max_score if passed else max(0, max_score - len(missing_emails) * 3)
 
-    return max_score, max_score, "สมาชิกทุกคนมี commit ตามเงื่อนไข" + note
+    if passed:
+        what = "ทุกคนมีอย่างน้อย 1 commit (ตรวจจาก author email ใน git history)"
+        sev = "MAJOR"
+    else:
+        what = "พบสมาชิกบางคนยังไม่มี commit (ตรวจจาก author email): " + ", ".join(missing_emails)
+        sev = "BLOCKER"
+
+    how_parts: List[str] = []
+    if missing_emails:
+        how_parts.append("ให้สมาชิกที่ยังไม่มี commit ทำการ commit อย่างน้อย 1 ครั้ง แล้วส่งใหม่ด้วย tag ครั้งถัดไป")
+        how_parts.append("ตรวจว่าเครื่องของสมาชิกตั้งค่า git user.email ให้ตรงกับ email ที่ระบุใน TEAM.md (เพื่อให้ระบบ match ได้)")
+    if has_non_email_entries:
+        how_parts.append("หมายเหตุ: บางบรรทัดใน TEAM.md ไม่มี email (มีแค่ชื่อ/@github) ระบบจึงตรวจแบบ match ไม่ได้ — แนะนำเพิ่ม email เพื่อให้รายงานชัด")
+
+    return {
+        "id": "M0.CONTRIB.01",
+        "title": "Team members have at least one commit",
+        "severity": sev,
+        "score": score,
+        "max_score": max_score,
+        "passed": passed,
+        "what_failed": what,
+        "how_to_fix": " | ".join(how_parts),
+        "evidence": {"path": "TEAM.md"},
+    }
+
+
+# ---- Adapters for different runner styles ----
+def check(ctx: GradingContext) -> Dict:
+    return evaluate_team_contribution(ctx.repo_path)
+
+
+def run(ctx: GradingContext) -> Dict:
+    return evaluate_team_contribution(ctx.repo_path)

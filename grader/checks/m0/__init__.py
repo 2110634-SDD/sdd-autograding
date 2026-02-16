@@ -1,0 +1,1 @@
+from grader.checks.m0.commit_contribution import evaluate_team_contribution
