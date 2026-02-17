@@ -1,9 +1,58 @@
 # grader/checks/m1/_util.py
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, Optional
 
+from grader.core.context import GradingContext
 
+
+# -----------------------------
+# Repo / file helpers
+# -----------------------------
+def repo(ctx: GradingContext) -> Path:
+    """
+    Return root path of the student repository.
+    Checks should use this as the base to locate required files.
+    """
+    return Path(ctx.repo_path)
+
+
+def read_text(path: Path, *, default: str = "", encoding: str = "utf-8") -> str:
+    """
+    Safe file reader. Never raises; returns default if missing/unreadable.
+    """
+    try:
+        return path.read_text(encoding=encoding)
+    except Exception:
+        return default
+
+
+# -----------------------------
+# Evidence helpers
+# -----------------------------
+def evidence_path(path: str, exists: bool) -> Dict[str, Any]:
+    """
+    Standard evidence about a file path existence.
+    """
+    return {"path": path, "text": f"{path} exists={exists}"}
+
+
+def evidence_text(path: str, text: str, *, line: Optional[int] = None, col: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Evidence with file path + optional location.
+    """
+    ev: Dict[str, Any] = {"path": path, "text": text}
+    if isinstance(line, int):
+        ev["line"] = line
+    if isinstance(col, int):
+        ev["col"] = col
+    return ev
+
+
+# -----------------------------
+# Standard item builder
+# -----------------------------
 def item(
     *args: Any,
     id: Optional[str] = None,
@@ -28,7 +77,7 @@ def item(
          what_failed="...", how_to_fix="...", evidence=...
        )
 
-    2) Legacy positional style (kept for compatibility with existing checks):
+    2) Legacy positional style (kept for compatibility):
        item("M1.X.01", "Title", "BLOCKER", 0, 1, evidence=...)
 
        Positional mapping:
@@ -54,48 +103,36 @@ def item(
             max_score = args[4]
 
     # defaults
-    id = str(id or "UNKNOWN")
-    title = str(title or id)
-    severity = str(severity or "INFO").upper()
+    cid = str(id or "UNKNOWN")
+    ttl = str(title or cid)
+    sev = str(severity or "INFO").upper()
 
     # normalize numeric
     try:
-        score_i = int(score)
+        sc = int(score)
     except Exception:
-        score_i = 0
+        sc = 0
     try:
-        max_i = int(max_score)
+        mx = int(max_score)
     except Exception:
-        max_i = 0
+        mx = 0
 
     if passed is None:
-        passed_b = (score_i == max_i)
+        ok = (sc == mx)
     else:
-        passed_b = bool(passed)
+        ok = bool(passed)
 
-    # If failed but what_failed empty, allow caller to still pass a comment later;
-    # keep empty by default.
     if evidence is None:
         evidence = {}
 
     return {
-        "id": id,
-        "title": title,
-        "severity": severity,
-        "score": score_i,
-        "max_score": max_i,
-        "passed": passed_b,
-        "what_failed": what_failed if not passed_b else "",
-        "how_to_fix": how_to_fix if not passed_b else "",
+        "id": cid,
+        "title": ttl,
+        "severity": sev,
+        "score": sc,
+        "max_score": mx,
+        "passed": ok,
+        "what_failed": what_failed if not ok else "",
+        "how_to_fix": how_to_fix if not ok else "",
         "evidence": evidence,
-    }
-
-
-def evidence_path(path: str, exists: bool) -> Dict[str, Any]:
-    """
-    Small helper to standardize evidence about file existence.
-    """
-    return {
-        "path": path,
-        "text": f"{path} exists={exists}",
     }
