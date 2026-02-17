@@ -11,17 +11,10 @@ from grader.core.context import GradingContext
 # Repo / file helpers
 # -----------------------------
 def repo(ctx: GradingContext) -> Path:
-    """
-    Return root path of the student repository.
-    Checks should use this as the base to locate required files.
-    """
     return Path(ctx.repo_path)
 
 
 def read_text(path: Path, *, default: str = "", encoding: str = "utf-8") -> str:
-    """
-    Safe file reader. Never raises; returns default if missing/unreadable.
-    """
     try:
         return path.read_text(encoding=encoding)
     except Exception:
@@ -32,16 +25,10 @@ def read_text(path: Path, *, default: str = "", encoding: str = "utf-8") -> str:
 # Evidence helpers
 # -----------------------------
 def evidence_path(path: str, exists: bool) -> Dict[str, Any]:
-    """
-    Standard evidence about a file path existence.
-    """
     return {"path": path, "text": f"{path} exists={exists}"}
 
 
 def evidence_text(path: str, text: str, *, line: Optional[int] = None, col: Optional[int] = None) -> Dict[str, Any]:
-    """
-    Evidence with file path + optional location.
-    """
     ev: Dict[str, Any] = {"path": path, "text": text}
     if isinstance(line, int):
         ev["line"] = line
@@ -55,6 +42,10 @@ def evidence_text(path: str, text: str, *, line: Optional[int] = None, col: Opti
 # -----------------------------
 def item(
     *args: Any,
+    # --- Aliases / compat ---
+    item_id: Optional[str] = None,  # alias for id (some checks use item_id=...)
+    max: Optional[int] = None,       # alias for max_score (legacy)
+    # --- Canonical fields ---
     id: Optional[str] = None,
     title: Optional[str] = None,
     severity: str = "INFO",
@@ -68,25 +59,20 @@ def item(
     """
     Build a standardized check-item dict.
 
-    Supports BOTH calling styles:
-
-    1) New keyword style (recommended):
-       item(
-         id="M1.X.01", title="...", severity="BLOCKER",
-         score=0, max_score=1,
-         what_failed="...", how_to_fix="...", evidence=...
-       )
-
-    2) Legacy positional style (kept for compatibility):
-       item("M1.X.01", "Title", "BLOCKER", 0, 1, evidence=...)
-
-       Positional mapping:
-         args[0] -> id
-         args[1] -> title
-         args[2] -> severity
-         args[3] -> score
-         args[4] -> max_score
+    Supports:
+      - keyword style using canonical args
+      - keyword aliases: item_id -> id, max -> max_score
+      - positional legacy style:
+          item("ID", "Title", "BLOCKER", 0, 1, evidence=...)
     """
+    # aliases
+    if id is None and item_id is not None:
+        id = item_id
+    if max is not None and (max_score is None or max_score == 0):
+        # only override if caller didn't set max_score explicitly
+        max_score = max
+
+    # positional legacy mapping
     if args:
         if len(args) > 5:
             raise TypeError(f"item() accepts at most 5 positional args, got {len(args)}")
@@ -102,12 +88,10 @@ def item(
         if len(args) >= 5:
             max_score = args[4]
 
-    # defaults
     cid = str(id or "UNKNOWN")
     ttl = str(title or cid)
     sev = str(severity or "INFO").upper()
 
-    # normalize numeric
     try:
         sc = int(score)
     except Exception:
