@@ -1,161 +1,135 @@
 # grader/checks/m1/uc_inventory.py
 from __future__ import annotations
-from pathlib import Path
-from typing import List
+
 import re
-from grader.core.models import Severity
-from grader.utils_fs import read_text, find_any, regex_fullmatch
-from grader.utils_md import parse_first_md_table
-from grader.checks.m1.common import ok, fail, msg
+from pathlib import Path
+from typing import List, Set
+
+from ._util import repo, read_text, item, evidence_path
+from .uc_fully_dressed import _uc_files  # reuse helper
 
 
-UC_FILE_REGEX = r"^UC\d\d-[A-Za-z0-9]+(-[A-Za-z0-9]+)*\.md$"
+REQUIRED_HEADERS = {"Use Case ID", "Use Case Name", "Primary Actor", "File"}
+PATH = "milestone1/use-case-descriptions/README.md"
 
 
-def list_uc_files(repo: Path) -> List[Path]:
-    base = repo / "milestone1" / "use-case-descriptions"
-    if not base.exists():
-        return []
-    files = [p for p in base.glob("UC*.md") if p.is_file()]
-    # Only count ones that look like UCnn-...
-    return sorted([p for p in files if re.match(r"^UC\d\d-", p.name)])
+def _parse_first_md_table(text: str):
+    # very small parser: find first table block with |...|
+    lines = [ln.rstrip() for ln in text.splitlines()]
+    idx = None
+    for i, ln in enumerate(lines):
+        if ln.strip().startswith("|") and "|" in ln.strip()[1:]:
+            idx = i
+            break
+    if idx is None:
+        return None
+    # header line + separator + rows until non-table
+    header = lines[idx]
+    if idx + 1 >= len(lines):
+        return None
+    sep = lines[idx + 1]
+    if "-" not in sep:
+        return None
+    def split_row(row: str):
+        parts = [c.strip() for c in row.strip().strip("|").split("|")]
+        return parts
+    headers = split_row(header)
+    rows = []
+    j = idx + 2
+    while j < len(lines):
+        ln = lines[j]
+        if not ln.strip().startswith("|"):
+            break
+        cells = split_row(ln)
+        if len(cells) >= len(headers):
+            rows.append(dict(zip(headers, cells)))
+        j += 1
+    return headers, rows
 
 
-def check_uc_readme_exists(repo: Path):
-    check_id = "M1.UC.PACK.01"
-    title = "use-case-descriptions/README.md exists"
-    possible = 1
-    path = repo / "milestone1" / "use-case-descriptions" / "README.md"
-    if path.exists():
-        return ok(check_id, title, possible)
-    return fail(check_id, title, 0, possible,
-                [msg(Severity.BLOCKER, "Missing use-case-descriptions/README.md",
-                     "ไฟล์นี้เป็น inventory ของ use cases และใช้ cross-check กับ UC files",
-                     ["Restore README.md from template and fill the table."],
-                     str(path))])
+def run_all(ctx):
+    r = repo(ctx)
+    p = r / PATH
+    out = []
 
+    if not p.exists():
+        out.append(item(
+            item_id="M1.UC.PACK.01",
+            title="use-case-descriptions/README.md exists",
+            severity="BLOCKER",
+            score=0, max_score=1,
+            what_failed="ไม่พบ use-case-descriptions/README.md",
+            how_to_fix=["Restore milestone1/use-case-descriptions/README.md จาก template แล้วกรอกตาราง inventory"],
+            evidence={**evidence_path(PATH, False)},
+        ))
+        # downstream
+        out.append(item("M1.UC.PACK.02","UC inventory table present with required headers","MAJOR",0,3,"ไม่พบ README จึงตรวจไม่ได้",["สร้าง README ก่อน"],evidence={**evidence_path(PATH, False)}))
+        out.append(item("M1.UC.TABLE.01","Every UC file listed in UC README table","MAJOR",0,3,"ไม่พบ README จึงตรวจไม่ได้",["สร้าง README ก่อน"],evidence={**evidence_path(PATH, False)}))
+        out.append(item("M1.UC.TABLE.02","UC README table does not contain placeholders","MINOR",0,2,"ไม่พบ README จึงตรวจไม่ได้",["สร้าง README ก่อน"],evidence={**evidence_path(PATH, False)}))
+        return out
 
-def check_uc_table_headers(repo: Path):
-    check_id = "M1.UC.PACK.02"
-    title = "UC inventory table present with required headers"
-    possible = 3
-    path = repo / "milestone1" / "use-case-descriptions" / "README.md"
-    if not path.exists():
-        return fail(check_id, title, 0, possible, [msg(Severity.MAJOR, "UC README missing", "Cannot validate table headers.", ["Create README.md"], str(path))])
+    out.append(item("M1.UC.PACK.01","use-case-descriptions/README.md exists","BLOCKER",1,1,evidence={**evidence_path(PATH, True)}))
 
-    text = read_text(path)
-    table = parse_first_md_table(text)
-    required = {"Use Case ID", "Use Case Name", "Primary Actor", "File"}
-    if table and required.issubset(set(table.headers)):
-        return ok(check_id, title, possible, debug={"headers": table.headers})
+    text = read_text(p)
+    t = _parse_first_md_table(text)
 
-    return fail(
-        check_id, title, 0, possible,
-        [msg(Severity.MAJOR,
-             "Missing or invalid UC inventory table headers",
-             "ตารางใน use-case-descriptions/README.md ต้องมีคอลัมน์หลักเพื่อให้ตรวจความสอดคล้องได้",
-             ["Ensure the README contains a markdown table.",
-              "Headers must include: Use Case ID | Use Case Name | Primary Actor | File"],
-             str(path))],
-        debug={"found_table": bool(table), "headers": (table.headers if table else [])},
-    )
+    if not t:
+        out.append(item(
+            item_id="M1.UC.PACK.02",
+            title="UC inventory table present with required headers",
+            severity="MAJOR",
+            score=0, max_score=3,
+            what_failed="ไม่พบ markdown table ใน UC README",
+            how_to_fix=["เพิ่มตาราง markdown ที่มี header: Use Case ID | Use Case Name | Primary Actor | File"],
+            evidence={**evidence_path(PATH, True), "table_found": False},
+        ))
+        # table-based checks fail
+        out.append(item("M1.UC.TABLE.01","Every UC file listed in UC README table","MAJOR",0,3,"ไม่มีตาราง จึง cross-check ไม่ได้",["เพิ่มตารางก่อน"],evidence={**evidence_path(PATH, True), "table_found": False}))
+        out.append(item("M1.UC.TABLE.02","UC README table does not contain placeholders","MINOR",0,2,"ไม่มีตาราง จึงตรวจ placeholder ไม่ได้",["เพิ่มตารางก่อน"],evidence={**evidence_path(PATH, True), "table_found": False}))
+        return out
 
+    headers, rows = t
+    missing_headers = sorted(list(REQUIRED_HEADERS - set(headers)))
+    ok_headers = (len(missing_headers) == 0)
+    out.append(item(
+        item_id="M1.UC.PACK.02",
+        title="UC inventory table present with required headers",
+        severity="MAJOR",
+        score=3 if ok_headers else 0,
+        max_score=3,
+        what_failed=f"ตารางขาด header: {missing_headers}" if not ok_headers else "",
+        how_to_fix=["แก้ header ของตารางให้ครบ Use Case ID / Use Case Name / Primary Actor / File"] if not ok_headers else [],
+        evidence={**evidence_path(PATH, True), "headers": headers, "missing_headers": missing_headers},
+    ))
 
-def check_uc_count(repo: Path):
-    check_id = "M1.UC.PACK.03"
-    title = "UC files count ≥ 2"
-    possible = 4
-    ucs = list_uc_files(repo)
-    if len(ucs) >= 2:
-        return ok(check_id, title, possible, debug={"uc_files": [p.name for p in ucs]})
+    # TABLE.02 placeholders
+    ph_tokens = ["<ชื่อ use case>", "<actor>", "UC01-<name>.md", "UC02-<name>.md", "UC03-<name>.md"]
+    found_ph = [tok for tok in ph_tokens if tok in text]
+    out.append(item(
+        item_id="M1.UC.TABLE.02",
+        title="UC README table does not contain placeholders",
+        severity="MINOR",
+        score=2 if not found_ph else 0,
+        max_score=2,
+        what_failed=f"ยังมี placeholder ใน UC README: {found_ph}" if found_ph else "",
+        how_to_fix=["แทน placeholder (<...>) ด้วยค่าจริง แล้วลบ placeholder ออก"] if found_ph else [],
+        evidence={**evidence_path(PATH, True), "placeholders_found": found_ph},
+    ))
 
-    return fail(
-        check_id, title, 0, possible,
-        [msg(Severity.BLOCKER,
-             f"Found only {len(ucs)} UC file(s); need at least 2",
-             "Milestone 1 requires at least 2 main use cases with fully dressed descriptions",
-             ["Add at least 2 files under milestone1/use-case-descriptions/ named UC01-...md, UC02-...md",
-              "Follow the provided template headings."],
-             evidence="; ".join(str(p) for p in ucs) or "No UC files found")],
-        debug={"count": len(ucs)},
-    )
+    # TABLE.01 every UC file listed
+    ucs = _uc_files(r)
+    listed = set((row.get("File", "") or "").strip() for row in rows)
+    missing_rows = [p.name for p in ucs if p.name not in listed]
+    ok_listed = (len(missing_rows) == 0)
+    out.append(item(
+        item_id="M1.UC.TABLE.01",
+        title="Every UC file listed in UC README table",
+        severity="MAJOR",
+        score=3 if ok_listed else 0,
+        max_score=3,
+        what_failed=f"มีไฟล์ UC ที่ไม่อยู่ในตาราง: {missing_rows}" if not ok_listed else "",
+        how_to_fix=["เพิ่ม row ในตารางให้ครบทุกไฟล์ UC และให้คอลัมน์ File ตรงชื่อไฟล์เป๊ะ"] if not ok_listed else [],
+        evidence={**evidence_path(PATH, True), "uc_files": [p.name for p in ucs], "listed_files": sorted([x for x in listed if x]), "missing_rows": missing_rows},
+    ))
 
-
-def check_uc_filename_kebab_case(repo: Path):
-    check_id = "M1.UC.NAME.01"
-    title = "UC filenames follow kebab-case convention"
-    possible = 3
-    ucs = list_uc_files(repo)
-    bad = [p.name for p in ucs if not regex_fullmatch(UC_FILE_REGEX, p.name)]
-    if not bad:
-        return ok(check_id, title, possible)
-
-    return fail(
-        check_id, title, 0, possible,
-        [msg(Severity.MAJOR,
-             f"UC filenames not kebab-case or not in required format: {', '.join(bad)}",
-             "Naming convention helps consistent linking and autograding across teams",
-             ["Rename files to match: UC01-Place-Order.md (kebab-case; no spaces).",
-              "Use only letters/numbers and '-' in the use case name part."],
-             evidence="; ".join(bad))],
-    )
-
-
-def check_uc_table_lists_all_uc_files(repo: Path):
-    check_id = "M1.UC.TABLE.01"
-    title = "Every UC file is listed in UC README table"
-    possible = 3
-
-    readme = repo / "milestone1" / "use-case-descriptions" / "README.md"
-    if not readme.exists():
-        return fail(check_id, title, 0, possible, [msg(Severity.MAJOR, "UC README missing", "Cannot cross-check UC inventory.", ["Create README.md"], str(readme))])
-
-    table = parse_first_md_table(read_text(readme))
-    if not table:
-        return fail(check_id, title, 0, possible, [msg(Severity.MAJOR, "No markdown table found", "Need the inventory table for cross-check.", ["Add the inventory table."], str(readme))])
-
-    ucs = list_uc_files(repo)
-    uc_names = [p.name for p in ucs]
-    file_col = "File"
-    listed = set((row.get(file_col, "") or "").strip() for row in table.rows)
-    missing_rows = [f for f in uc_names if f not in listed]
-
-    if not missing_rows:
-        return ok(check_id, title, possible)
-
-    return fail(
-        check_id, title, 0, possible,
-        [msg(Severity.MAJOR,
-             f"UC README table is missing rows for: {', '.join(missing_rows)}",
-             "Inventory table must match actual submitted UC files (for traceability and grading)",
-             ["Add a row for each UC file in the table.",
-              "Ensure the 'File' column matches the filename exactly."],
-             evidence=str(readme))],
-        debug={"missing_rows": missing_rows, "listed_files": sorted(listed)},
-    )
-
-
-def check_uc_table_no_placeholders(repo: Path):
-    check_id = "M1.UC.TABLE.02"
-    title = "UC README table does not contain placeholders"
-    possible = 2
-    readme = repo / "milestone1" / "use-case-descriptions" / "README.md"
-    if not readme.exists():
-        return fail(check_id, title, 0, possible, [msg(Severity.MINOR, "UC README missing", "Cannot validate placeholders.", ["Create README.md"], str(readme))])
-
-    text = read_text(readme)
-    bad_tokens = ["<ชื่อ use case>", "<actor>", "UC01-<name>.md", "UC02-<name>.md", "UC03-<name>.md"]
-    found = [t for t in bad_tokens if t in text]
-    if not found:
-        return ok(check_id, title, possible)
-
-    return fail(
-        check_id, title, 0, possible,
-        [msg(Severity.MINOR,
-             f"UC README still contains placeholder tokens: {', '.join(found)}",
-             "Placeholders mean the table has not been filled with real use case info",
-             ["Replace placeholders with actual use case names and actors.",
-              "Ensure the File column matches real UC filenames."],
-             evidence=str(readme))],
-        debug={"found": found},
-    )
+    return out

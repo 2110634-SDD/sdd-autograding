@@ -1,23 +1,21 @@
 # tools/render_summary.py
 from __future__ import annotations
 
-import argparse
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple
+import re
+from datetime import datetime
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-SEV_ORDER = {"BLOCKER": 0, "MAJOR": 1, "MINOR": 2, "INFO": 3, "UNKNOWN": 9}
-SEV_TO_ANNOT = {"BLOCKER": "error", "MAJOR": "warning", "MINOR": "notice", "INFO": "notice", "UNKNOWN": "warning"}
-
-# hard limit for GitHub annotations message length (keep safe)
-ANNOT_MAX = 900
+from grader.core.result import GradingResult
 
 
-def _get(d: Dict[str, Any], *keys: str, default: Any = None) -> Any:
-    for k in keys:
-        if k in d and d[k] is not None:
-            return d[k]
-    return default
+SEV_ORDER = {"BLOCKER": 0, "MAJOR": 1, "MINOR": 2, "INFO": 3}
+DEFAULT_EVIDENCE_MAX = 140
+
+
+def _now_iso() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 
 def _as_str(x: Any) -> str:
@@ -25,332 +23,221 @@ def _as_str(x: Any) -> str:
         return ""
     if isinstance(x, str):
         return x
-    return str(x)
-
-
-def _norm_sev(x: Any) -> str:
-    s = _as_str(x).strip().upper()
-    if s in ("BLOCKER", "MAJOR", "MINOR", "INFO"):
-        return s
-    return "UNKNOWN"
-
-
-def _status_bool(check: Dict[str, Any]) -> Optional[bool]:
-    for k in ("passed", "pass", "ok", "success"):
-        if k in check and isinstance(check[k], bool):
-            return check[k]
-    status = _as_str(_get(check, "status", "result", default="")).lower()
-    if status in ("pass", "passed", "ok", "success", "green"):
-        return True
-    if status in ("fail", "failed", "error", "red"):
-        return False
-    return None
-
-
-def _score_pair(check: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
-    score = _get(check, "score", "points", default=None)
-    max_score = _get(check, "max_score", "max", "out_of", default=None)
     try:
-        score_f = float(score) if score is not None else None
+        return json.dumps(x, ensure_ascii=False)
     except Exception:
-        score_f = None
-    try:
-        max_f = float(max_score) if max_score is not None else None
-    except Exception:
-        max_f = None
-    return score_f, max_f
-
-
-def _evidence_to_file_line(ev: Any) -> Tuple[str, Optional[int]]:
-    if isinstance(ev, dict):
-        path = _as_str(_get(ev, "path", "file", "filepath", default="")).strip()
-        line = _get(ev, "line", "lineno", default=None)
-        try:
-            line_i = int(line) if line is not None else None
-        except Exception:
-            line_i = None
-        return path, line_i
-
-    s = _as_str(ev).strip()
-    if ":" in s:
-        head, tail = s.rsplit(":", 1)
-        try:
-            line_i = int(tail)
-            return head, line_i
-        except Exception:
-            pass
-    return s, None
-
-
-def _extract_checks(result: Dict[str, Any]) -> List[Dict[str, Any]]:
-    for k in ("checks", "items", "results", "details"):
-        v = result.get(k)
-        if isinstance(v, list):
-            return [x for x in v if isinstance(x, dict)]
-    rep = result.get("report")
-    if isinstance(rep, dict):
-        for k in ("checks", "items", "results"):
-            v = rep.get(k)
-            if isinstance(v, list):
-                return [x for x in v if isinstance(x, dict)]
-    return []
-
-
-def _fallback_fields_from_comment(c: Dict[str, Any]) -> Tuple[str, str, str]:
-    comment = _as_str(_get(c, "comment", default="")).strip()
-    if not comment:
-        return "", "", ""
-
-    # Keep multi-line comment as what_failed by default
-    what = comment
-    how = ""
-    ev = ""
-
-    # Heuristic split if certain Thai markers exist
-    if "วิธีแก้:" in comment:
-        before, after = comment.split("วิธีแก้:", 1)
-        what = before.strip(" \n|")
-        how = after.strip()
-
-    if "บรรทัดที่ต้องแก้" in comment:
-        # allow "บรรทัดที่ต้องแก้ (TEAM.md):"
-        m = comment.split("บรรทัดที่ต้องแก้", 1)
-        if len(m) == 2:
-            before = m[0]
-            after = "บรรทัดที่ต้องแก้" + m[1]
-            what = before.strip(" \n|")
-            ev = after.strip()
-
-    return what, how, ev
-
-
-def _one_line(s: str) -> str:
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-    # compress whitespace but keep bullet markers visible
-    s = s.replace("\n", " ⏎ ")
-    s = " ".join(s.split())
-    return s.strip()
+        return str(x)
 
 
 def _truncate(s: str, n: int) -> str:
+    s = (s or "").strip()
     if len(s) <= n:
         return s
-    return s[: max(0, n - 3)] + "..."
+    return s[: max(0, n - 1)].rstrip() + "…"
 
 
-def render(result: Dict[str, Any], milestone: str, submission_ref: str, submission_tag: str) -> Tuple[str, str]:
-    checks = _extract_checks(result)
+def _md_escape(s: str) -> str:
+    # minimal escape for table rendering
+    return (s or "").replace("\n", "<br>").replace("|", "\\|")
 
-    total_score = _get(result, "total_score", "score_total", "total", default=None)
-    total_max = _get(result, "max_score", "score_max", "total_max", "max", default=None)
 
+def _severity(item: Dict[str, Any]) -> str:
+    return (item.get("severity") or "INFO").upper()
+
+
+def _score_str(item: Dict[str, Any]) -> str:
+    score = item.get("score")
+    max_score = item.get("max_score")
     try:
-        total_score_f = float(total_score) if total_score is not None else None
+        if score is None and max_score is None:
+            return "-"
+        if max_score in (None, 0, "0"):
+            return f"{score}"
+        return f"{score}/{max_score}"
     except Exception:
-        total_score_f = None
-    try:
-        total_max_f = float(total_max) if total_max is not None else None
-    except Exception:
-        total_max_f = None
+        return f"{score}/{max_score}"
 
-    # derive if missing
-    if total_score_f is None or total_max_f is None:
-        ssum = 0.0
-        msum = 0.0
-        any_scores = False
-        for c in checks:
-            s, m = _score_pair(c)
-            if s is not None and m is not None:
-                any_scores = True
-                ssum += s
-                msum += m
-        if any_scores:
-            total_score_f = total_score_f if total_score_f is not None else ssum
-            total_max_f = total_max_f if total_max_f is not None else msum
 
-    failed: List[Dict[str, Any]] = []
-    passed_cnt = 0
-    sev_counts = {"BLOCKER": 0, "MAJOR": 0, "MINOR": 0, "INFO": 0, "UNKNOWN": 0}
+def _failed_items(items: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [it for it in items if not bool(it.get("passed"))]
 
-    for c in checks:
-        sev_raw = _get(c, "severity", "level", default=None)
-        sev = _norm_sev(sev_raw) if sev_raw is not None else "UNKNOWN"
 
-        pb = _status_bool(c)
-        s, m = _score_pair(c)
+def _overall_passed(items: Iterable[Dict[str, Any]]) -> bool:
+    # FAIL iff any BLOCKER failed
+    for it in items:
+        if not bool(it.get("passed")) and _severity(it) == "BLOCKER":
+            return False
+    return True
 
-        if pb is None and s is not None and m is not None:
-            pb = (m <= 0) or (s >= m)
 
-        if pb is True:
-            passed_cnt += 1
-            if sev == "UNKNOWN":
-                sev = "INFO"
-        else:
-            # treat as failed
-            if sev == "UNKNOWN":
-                sev = "MAJOR"
-            failed.append(c)
+def _annotation_level(severity: str) -> str:
+    severity = (severity or "").upper()
+    return "error" if severity == "BLOCKER" else "warning"
 
-        sev_counts[sev] = sev_counts.get(sev, 0) + 1
-        c["severity"] = sev
 
-        # legacy fallback: comment -> what/how/evidence
-        if not _get(c, "what_failed", "message", "summary", default=""):
-            what, how, ev = _fallback_fields_from_comment(c)
-            if what:
-                c["what_failed"] = what
-            if how and not _get(c, "how_to_fix", "fix", "hint", default=""):
-                c["how_to_fix"] = how
-            if ev and not _get(c, "evidence", "evidences", default=""):
-                c["evidence"] = ev
+def _evidence_to_location(evidence: Any) -> Tuple[Optional[str], Optional[int], Optional[int], str]:
+    """
+    Return (file, line, col, evidence_text).
+    evidence may be:
+      - str
+      - dict {path, line, col, text, ...}
+      - list of such
+    """
+    if isinstance(evidence, list) and evidence:
+        for e in evidence:
+            f, l, c, t = _evidence_to_location(e)
+            if f or t:
+                return f, l, c, t
+        return None, None, None, ""
 
-    def _sort_key(c: Dict[str, Any]):
-        sev = _norm_sev(_get(c, "severity", "level", default="UNKNOWN"))
-        cid = _as_str(_get(c, "id", "check_id", "code", default=""))
-        return (SEV_ORDER.get(sev, 9), cid)
+    if isinstance(evidence, dict):
+        path = evidence.get("path") or evidence.get("file")
+        line = evidence.get("line")
+        col = evidence.get("col")
+        text = evidence.get("text")
+        if text is None:
+            text = _as_str(evidence)
+        return (
+            path,
+            int(line) if isinstance(line, int) else None,
+            int(col) if isinstance(col, int) else None,
+            _as_str(text),
+        )
 
-    failed.sort(key=_sort_key)
+    return None, None, None, _as_str(evidence)
 
-    explicit_status = _as_str(_get(result, "status", "result", default="")).upper()
-    if explicit_status in ("PASS", "PASSED", "OK", "SUCCESS"):
-        overall = "PASS"
-    elif explicit_status in ("FAIL", "FAILED", "ERROR"):
-        overall = "FAIL"
+
+def _write_summary(md: str) -> None:
+    summary_path = os.getenv("GITHUB_STEP_SUMMARY", "").strip()
+    if not summary_path:
+        # Not in GitHub Actions; fallback to stdout
+        print(md)
+        return
+
+    with open(summary_path, "a", encoding="utf-8") as f:
+        f.write(md)
+        if not md.endswith("\n"):
+            f.write("\n")
+
+
+def _emit_annotation(item: Dict[str, Any]) -> None:
+    """
+    GitHub Actions workflow command:
+      ::error file=...,line=...,col=...::message
+    """
+    sev = _severity(item)
+    level = _annotation_level(sev)
+
+    cid = _as_str(item.get("id"))
+    title = _as_str(item.get("title"))
+    what_failed = _as_str(item.get("what_failed"))
+    how_to_fix = _as_str(item.get("how_to_fix"))
+
+    evidence = item.get("evidence")
+    file, line, col, ev_text = _evidence_to_location(evidence)
+
+    msg_core = f"[{cid}] {title} — {what_failed}".strip()
+    if how_to_fix:
+        msg_core += f" | Fix: {how_to_fix}"
+    if ev_text:
+        msg_core += f" | Evidence: {_truncate(ev_text, 160)}"
+
+    # sanitize newlines for workflow commands
+    msg_core = re.sub(r"[\r\n]+", " ", msg_core).strip()
+
+    meta_parts = []
+    if file:
+        meta_parts.append(f"file={file}")
+    if line:
+        meta_parts.append(f"line={line}")
+    if col:
+        meta_parts.append(f"col={col}")
+    meta = ",".join(meta_parts)
+
+    if meta:
+        print(f"::{level} {meta}::{msg_core}")
     else:
-        any_blocker_fail = any(_norm_sev(_get(c, "severity", "level", default="UNKNOWN")) == "BLOCKER" for c in failed)
-        overall = "FAIL" if any_blocker_fail else "PASS"
-
-    action_now = failed[:3]
-
-    if total_score_f is not None and total_max_f is not None and total_max_f > 0:
-        score_line = f"**Score:** {total_score_f:.0f}/{total_max_f:.0f}"
-    elif total_score_f is not None:
-        score_line = f"**Score:** {total_score_f:.0f}"
-    else:
-        score_line = "**Score:** (not provided)"
-
-    tag_show = submission_tag if submission_tag else "(not a tag run)"
-    ref_show = submission_ref if submission_ref else "(unknown)"
-
-    md = []
-    md.append(f"# Autograde Result — {milestone}")
-    md.append("")
-    md.append(f"- **Submission tag:** `{tag_show}`")
-    md.append(f"- **Submission ref:** `{ref_show}`")
-    md.append(f"- **Status:** **{overall}**")
-    md.append(f"- {score_line}")
-    md.append("")
-    md.append(f"- **Failed checks:** {len(failed)} / **Passed checks:** {passed_cnt} / **Total checks:** {len(checks)}")
-    md.append(f"- **Severity counts:** BLOCKER={sev_counts.get('BLOCKER',0)}, MAJOR={sev_counts.get('MAJOR',0)}, MINOR={sev_counts.get('MINOR',0)}")
-    md.append("")
-
-    if action_now:
-        md.append("## Action Now (แก้ 1–3 อย่างนี้ก่อน)")
-        md.append("")
-        for c in action_now:
-            cid = _as_str(_get(c, "id", "check_id", "code", default="(no id)"))
-            title = _as_str(_get(c, "title", "name", default="")).strip()
-            sev = _norm_sev(_get(c, "severity", "level", default="UNKNOWN"))
-            what = _as_str(_get(c, "what_failed", "message", "summary", "comment", default="")).strip()
-            how = _as_str(_get(c, "how_to_fix", "fix", "hint", default="")).strip()
-            ev = _as_str(_get(c, "evidence", "evidences", default="")).strip()
-
-            label = f"**{cid}**" + (f" — {title}" if title else "")
-            line = f"- [{sev}] {label}: {what if what else 'Check failed'}"
-            if how:
-                line += f"  \n  ↳ **How to fix:** {how}"
-            if ev:
-                line += f"  \n  ↳ **Evidence:**\n{ev}"
-            md.append(line)
-        md.append("")
-
-    md.append("## Failed checks")
-    md.append("")
-    if not failed:
-        md.append("✅ ไม่มี failed checks")
-    else:
-        md.append("| ID | Severity | Score | What failed | How to fix | Evidence |")
-        md.append("|---|---:|---:|---|---|---|")
-        for c in failed:
-            cid = _as_str(_get(c, "id", "check_id", "code", default="(no id)"))
-            sev = _norm_sev(_get(c, "severity", "level", default="UNKNOWN"))
-            s, m = _score_pair(c)
-            if s is not None and m is not None:
-                score_cell = f"{int(s)}/{int(m)}"
-            elif s is not None:
-                score_cell = f"{int(s)}"
-            else:
-                score_cell = ""
-            what = _one_line(_as_str(_get(c, "what_failed", "message", "summary", "comment", default="")))
-            how = _one_line(_as_str(_get(c, "how_to_fix", "fix", "hint", default="")))
-            ev = _one_line(_as_str(_get(c, "evidence", "evidences", default="")))
-            md.append(f"| `{cid}` | {sev} | {score_cell} | {what} | {how} | {ev} |")
-    md.append("")
-    md.append("## Notes")
-    md.append("")
-    md.append("- รายละเอียดเต็ม (JSON/Logs) ดูได้จาก artifact ของ run นี้")
-    md.append("")
-
-    summary_md = "\n".join(md)
-
-    ann_lines: List[str] = []
-    for c in failed:
-        sev = _norm_sev(_get(c, "severity", "level", default="UNKNOWN"))
-        atype = SEV_TO_ANNOT.get(sev, "warning")
-
-        cid = _as_str(_get(c, "id", "check_id", "code", default="(no id)"))
-        title = _as_str(_get(c, "title", "name", default="")).strip()
-
-        what = _as_str(_get(c, "what_failed", "message", "summary", "comment", default="Check failed")).strip()
-        how = _as_str(_get(c, "how_to_fix", "fix", "hint", default="")).strip()
-        ev = _as_str(_get(c, "evidence", "evidences", default="")).strip()
-
-        msg = f"[{cid}] {title + ' — ' if title else ''}{what}"
-        if how:
-            msg += f" | How to fix: {how}"
-        if ev:
-            msg += f" | Evidence: {ev}"
-
-        msg = _truncate(_one_line(msg), ANNOT_MAX)
-
-        # no file/line for this check by default
-        ann_lines.append(f"::{atype}::{msg}")
-
-    annotations_txt = "\n".join(ann_lines) + ("\n" if ann_lines else "")
-    return summary_md, annotations_txt
+        print(f"::{level}::{msg_core}")
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--result", required=True, help="Path to grading_result_*.json")
-    ap.add_argument("--milestone", required=True, help="Milestone id เช่น M0")
-    ap.add_argument("--submission-ref", default="", help="Submission ref (tag/sha/branch)")
-    ap.add_argument("--submission-tag", default="", help="Submission tag if applicable")
-    ap.add_argument("--summary-out", required=True, help="Output markdown path")
-    ap.add_argument("--annotations-out", required=True, help="Output annotations text path")
-    args = ap.parse_args()
+def render_to_github_actions(result: GradingResult, milestone: str) -> bool:
+    """
+    Writes:
+      - Job Summary (GITHUB_STEP_SUMMARY)
+      - Annotations (stdout workflow commands)
+    Returns:
+      overall_passed (FAIL if any BLOCKER failed)
+    """
+    items = list(getattr(result, "items", None) or [])
+    overall = _overall_passed(items)
 
-    with open(args.result, "r", encoding="utf-8") as f:
-        result = json.load(f)
-
-    summary_md, annotations_txt = render(
-        result=result,
-        milestone=args.milestone,
-        submission_ref=args.submission_ref,
-        submission_tag=args.submission_tag,
+    failed = _failed_items(items)
+    failed_sorted = sorted(
+        failed,
+        key=lambda it: (SEV_ORDER.get(_severity(it), 99), _as_str(it.get("id"))),
     )
 
-    os.makedirs(os.path.dirname(args.summary_out) or ".", exist_ok=True)
-    with open(args.summary_out, "w", encoding="utf-8") as f:
-        f.write(summary_md)
+    counts = getattr(result, "summary_counts", None) or {}
+    passed_count = counts.get("passed", sum(1 for it in items if bool(it.get("passed"))))
+    failed_count = counts.get("failed", len(items) - passed_count)
+    blocker_failed = sum(1 for it in items if (not bool(it.get("passed"))) and _severity(it) == "BLOCKER")
 
-    os.makedirs(os.path.dirname(args.annotations_out) or ".", exist_ok=True)
-    with open(args.annotations_out, "w", encoding="utf-8") as f:
-        f.write(annotations_txt)
+    total_score = getattr(result, "total_score", None)
+    total_max = getattr(result, "total_max_score", None)
 
-    return 0
+    score_line = ""
+    if total_score is not None or total_max is not None:
+        score_line = f"- **Score:** {total_score}/{total_max}\n"
 
+    status_emoji = "✅" if overall else "❌"
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+    md: List[str] = []
+    md.append(f"# Autograde Result — {milestone}\n")
+    md.append(f"- **Status:** {status_emoji} **{'PASS' if overall else 'FAIL'}**\n")
+    md.append(f"- **Checks:** {passed_count} passed / {failed_count} failed (BLOCKER failed: {blocker_failed})\n")
+    if score_line:
+        md.append(score_line)
+    md.append(f"- **Generated:** {_now_iso()}\n\n")
+
+    if failed_sorted:
+        md.append("## Failed checks\n\n")
+        md.append(
+            "| ID | Title | Severity | Score | What failed | How to fix | Evidence |\n"
+            "|---|---|---:|---:|---|---|---|\n"
+        )
+        for it in failed_sorted:
+            evid = it.get("evidence")
+            _, _, _, ev_text = _evidence_to_location(evid)
+            md.append(
+                f"| `{_md_escape(_as_str(it.get('id')))}`"
+                f" | {_md_escape(_as_str(it.get('title')))}"
+                f" | **{_md_escape(_severity(it))}**"
+                f" | `{_md_escape(_score_str(it))}`"
+                f" | {_md_escape(_truncate(_as_str(it.get('what_failed')), 160))}"
+                f" | {_md_escape(_truncate(_as_str(it.get('how_to_fix')), 160))}"
+                f" | {_md_escape(_truncate(ev_text, DEFAULT_EVIDENCE_MAX))}"
+                " |\n"
+            )
+        md.append("\n")
+    else:
+        md.append("## Failed checks\n\n- None 🎉\n\n")
+
+    md.append("<details><summary>All checks</summary>\n\n")
+    md.append("| ID | Severity | Status | Score | Title |\n|---|---:|---:|---:|---|\n")
+    for it in sorted(items, key=lambda x: (SEV_ORDER.get(_severity(x), 99), _as_str(x.get("id")))):
+        st = "PASS" if bool(it.get("passed")) else "FAIL"
+        md.append(
+            f"| `{_md_escape(_as_str(it.get('id')))}`"
+            f" | {_md_escape(_severity(it))}"
+            f" | **{st}**"
+            f" | `{_md_escape(_score_str(it))}`"
+            f" | {_md_escape(_as_str(it.get('title')))} |\n"
+        )
+    md.append("\n</details>\n")
+
+    _write_summary("".join(md))
+
+    for it in failed_sorted:
+        _emit_annotation(it)
+
+    return overall

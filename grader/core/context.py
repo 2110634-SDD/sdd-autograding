@@ -1,4 +1,5 @@
 # grader/core/context.py
+from __future__ import annotations
 
 import json
 import os
@@ -23,12 +24,14 @@ class GradingContext:
         submission_ref: str = "",
         submission_tag: str = "",
         parsed_tag: Optional[Dict[str, Any]] = None,
+        debug: bool = False,
     ):
         self.repo_path = repo_path
         self.milestone = milestone
         self.submission_ref = submission_ref
         self.submission_tag = submission_tag
         self.parsed_tag = parsed_tag or {}
+        self.debug = bool(debug)
 
     @staticmethod
     def _normalize_milestone(raw: str) -> str:
@@ -45,15 +48,19 @@ class GradingContext:
         # common forms: M0..M9
         if len(s2) >= 2 and s2[0] == "M" and s2[1:].isdigit():
             return s2
-        # fallback: keep uppercase
         return s2
+
+    @staticmethod
+    def _env_truthy(name: str, default: str = "0") -> bool:
+        v = (os.environ.get(name, default) or "").strip().lower()
+        return v in ("1", "true", "yes", "y", "on")
 
     @classmethod
     def from_env(cls):
-        # milestone: normalize ให้ deterministic
+        # milestone: normalize deterministic
         milestone = cls._normalize_milestone(os.environ.get("MILESTONE", ""))
 
-        # ✅ Always grade the student repo workspace, even if we run inside sdd-autograding/
+        # Always grade the student repo workspace, even if we run inside sdd-autograding/
         base = (
             os.environ.get("STUDENT_REPO_PATH")
             or os.environ.get("REPO_PATH")
@@ -67,6 +74,8 @@ class GradingContext:
 
         submission_ref = (os.environ.get("SUBMISSION_REF") or "").strip()
         submission_tag = (os.environ.get("SUBMISSION_TAG") or "").strip()
+
+        debug = cls._env_truthy("GRADER_DEBUG", default="0")
 
         parsed_tag: Optional[Dict[str, Any]] = None
         if submission_tag:
@@ -92,11 +101,13 @@ class GradingContext:
             submission_ref=submission_ref,
             submission_tag=submission_tag,
             parsed_tag=parsed_tag,
+            debug=debug,
         )
 
         # Helpful debug prints (safe)
         print(f"[autograder] repo_path={ctx.repo_path}")
         print(f"[autograder] milestone={ctx.milestone}")
+        print(f"[autograder] debug={ctx.debug}")
         if ctx.submission_ref:
             print(f"[autograder] submission_ref={ctx.submission_ref}")
         if ctx.submission_tag:
@@ -108,18 +119,19 @@ class GradingContext:
 
     def write_result(self, *, milestone, total, max, items):
         """
-        Write grading result (to runner workspace only; NO commit back).
-        - Writes legacy: <repo>/grading_result.json (backward-compatible)
-        - Writes milestone-specific: <repo>/grading/grading_result_<M>.json
+        Write grading result to student repo workspace ONLY when GRADER_DEBUG=1.
 
-        This method must never raise.
+        - If not debug: do nothing (must never raise).
+        - If debug:
+            legacy: <repo>/grading_result.json (backward-compatible)
+            milestone-specific: <repo>/grading/grading_result_<M>.json
         """
-        # Normalize milestone for filenames
+        if not self.debug:
+            print("[autograder] debug disabled; skip writing grading_result*.json")
+            return
+
         milestone_norm = self._normalize_milestone(milestone)
 
-        # Build a result payload that is compatible with:
-        # - older consumers: {milestone,total,max,items}
-        # - new renderer: {milestone,total_score,max_score,checks/items,...}
         result: Dict[str, Any] = {
             # core identifiers
             "milestone": milestone_norm,
@@ -132,7 +144,7 @@ class GradingContext:
             # renderer-friendly aliases
             "total_score": total,
             "max_score": max,
-            "checks": items,  # alias so renderers that look for 'checks' also work
+            "checks": items,
 
             # submission metadata (for UI)
             "submission": {
@@ -149,7 +161,7 @@ class GradingContext:
         try:
             payload = json.dumps(result, indent=2, ensure_ascii=False)
 
-            # 1) legacy (backward-compatible)
+            # 1) legacy
             legacy_path.write_text(payload, encoding="utf-8")
 
             # 2) milestone-specific

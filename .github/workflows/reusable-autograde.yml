@@ -38,15 +38,8 @@ on:
         type: boolean
         default: false
 
-      results_dir:
-        description: "โฟลเดอร์ผลลัพธ์ใน student repo"
-        required: false
-        type: string
-        default: "grading"
-
 permissions:
   contents: read
-  actions: read
 
 jobs:
   autograde:
@@ -135,7 +128,7 @@ jobs:
             echo "No requirements.txt in sdd-autograding; skipping pip install."
           fi
 
-      - name: Run autograder
+      - name: Run autograder (writes Job Summary + annotations)
         shell: bash
         env:
           MILESTONE: ${{ inputs.milestone }}
@@ -153,58 +146,20 @@ jobs:
           echo "▶ SUBMISSION_TAG=$SUBMISSION_TAG"
           python -m grader.main
 
-      - name: Verify grading result
-        shell: bash
-        env:
-          MILESTONE: ${{ inputs.milestone }}
-          RESULTS_DIR: ${{ inputs.results_dir }}
-        run: |
-          set -euo pipefail
-          RESULT_PATH="${RESULTS_DIR}/grading_result_${MILESTONE}.json"
-          if [ ! -f "$RESULT_PATH" ]; then
-            echo "::error::Missing result file: $RESULT_PATH"
-            echo "Found these grading_result*.json files:"
-            find . -maxdepth 6 -type f -name "grading_result*.json" -print || true
-            exit 1
-          fi
-          echo "Found: $RESULT_PATH"
-          sed -n '1,120p' "$RESULT_PATH"
-
-      - name: Render human-friendly summary + annotations
-        shell: bash
-        env:
-          MILESTONE: ${{ inputs.milestone }}
-          RESULTS_DIR: ${{ inputs.results_dir }}
-          SUBMISSION_REF: ${{ steps.subref.outputs.resolved_ref }}
-          SUBMISSION_TAG: ${{ steps.subref.outputs.submission_tag }}
-        run: |
-          set -euo pipefail
-          RESULT_PATH="${RESULTS_DIR}/grading_result_${MILESTONE}.json"
-          SUMMARY_MD="${RESULTS_DIR}/summary_${MILESTONE}.md"
-          ANNO_TXT="${RESULTS_DIR}/annotations_${MILESTONE}.txt"
-
-          python sdd-autograding/tools/render_summary.py \
-            --result "$RESULT_PATH" \
-            --milestone "$MILESTONE" \
-            --submission-ref "${SUBMISSION_REF}" \
-            --submission-tag "${SUBMISSION_TAG}" \
-            --summary-out "$SUMMARY_MD" \
-            --annotations-out "$ANNO_TXT"
-
-          cat "$SUMMARY_MD" >> "$GITHUB_STEP_SUMMARY"
-          cat "$ANNO_TXT"
-
-      - name: Upload grading artifact
+          
+      - name: Upload debug artifacts (grading_result*.json)
+        if: ${{ inputs.debug }}
         uses: actions/upload-artifact@v4
         with:
-          name: grading_result_${{ inputs.milestone }}
+          name: debug_grading_${{ inputs.milestone }}
           path: |
-            ${{ inputs.results_dir }}/grading_result_${{ inputs.milestone }}.json
-            ${{ inputs.results_dir }}/summary_${{ inputs.milestone }}.md
-            ${{ inputs.results_dir }}/annotations_${{ inputs.milestone }}.txt
-          if-no-files-found: error
+            grading_result.json
+            grading/grading_result_${{ inputs.milestone }}.json
+          if-no-files-found: warn
+
 
       - name: Done
+        if: ${{ always() }}
         shell: bash
         run: |
           set -euo pipefail

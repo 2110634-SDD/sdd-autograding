@@ -1,8 +1,5 @@
-from grader.checks.m1 import (
-    instructions_exists,
-    instructions_anchors,
-    manifest_core,
-    readme_overview_filled,
-    summary_minimums,
-    uc_package,
-)
+# grader/checks/m1/__init__.py
+"""
+M1 checks are assembled via grader.checks.m1.run_m1
+Avoid importing many submodules here to prevent import-time failures.
+"""

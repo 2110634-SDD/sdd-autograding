@@ -1,13 +1,34 @@
-from ._util import repo, read_text
+# grader/checks/m1/summary_minimums.py
+from __future__ import annotations
+
 import re
+
+from ._util import repo, read_text, item
+
 
 def _count_ellipsis_lines(text: str) -> int:
     return len(re.findall(r"^\s*>\s*…\s*$", text, flags=re.MULTILINE))
 
+
 def run(ctx):
+    rel = "milestone1/STUDENT_SUMMARY.md"
     path = repo(ctx) / "milestone1" / "STUDENT_SUMMARY.md"
+
     if not path.exists():
-        return 0, 12, "[BLOCKER] Missing milestone1/STUDENT_SUMMARY.md"
+        return item(
+            item_id="M1.SUMMARY.MIN",
+            title="STUDENT_SUMMARY.md minimums filled",
+            severity="BLOCKER",
+            score=0,
+            max_score=12,
+            what_failed="ไม่พบไฟล์ milestone1/STUDENT_SUMMARY.md",
+            how_to_fix=[
+                "สร้าง milestone1/STUDENT_SUMMARY.md ตาม template",
+                "กรอกส่วนที่เป็น placeholder ให้ครบ แล้ว commit",
+                "ติด tag ส่งใหม่",
+            ],
+            evidence={"path": rel, "exists": False},
+        )
 
     text = read_text(path)
     issues = []
@@ -49,16 +70,36 @@ def run(ctx):
         issues.append("Open questions/risks < 2 bullets")
 
     if not issues:
-        return 12, 12, "OK: STUDENT_SUMMARY.md minimums filled"
+        return item(
+            item_id="M1.SUMMARY.MIN",
+            title="STUDENT_SUMMARY.md minimums filled",
+            severity="MAJOR",
+            score=12,
+            max_score=12,
+            evidence={"path": rel, "exists": True, "issues": []},
+        )
 
     score = max(0, 12 - 2 * len(issues))
-    return score, 12, (
-        "[MAJOR] STUDENT_SUMMARY.md is incomplete\n"
-        f"Issues: {', '.join(issues)}\n"
-        "Why: This document captures design reasoning (why), scope, QA drivers, and open questions.\n"
-        "Fix:\n"
-        "- Replace all '> …' placeholders with real content.\n"
-        "- Provide at least 1 out-of-scope item.\n"
-        "- Fill UC1/UC2 names and QA driver + trade-off.\n"
-        "- Add 2–3 risks to validate in M2."
+
+    return item(
+        item_id="M1.SUMMARY.MIN",
+        title="STUDENT_SUMMARY.md minimums filled",
+        severity="MAJOR",
+        score=score,
+        max_score=12,
+        what_failed="STUDENT_SUMMARY.md ยังกรอกไม่ครบตาม minimum requirements",
+        how_to_fix=[
+            "แทนที่ทุกบรรทัดที่เป็น '> …' ด้วยเนื้อหาจริง",
+            "เติม Out of scope อย่างน้อย 1 ข้อ (เป็น bullet/ข้อความจริง ไม่ใช่ placeholder)",
+            "ใส่ชื่อ UC1/UC2 และ Quality Attribute driver ให้เป็นคำจริง (ไม่ใช่ <...>)",
+            "เขียน Trade-off ที่มีเนื้อหา และเพิ่มความเสี่ยง/คำถามอย่างน้อย 2 bullet",
+            "commit แล้วติด tag ส่งใหม่",
+        ],
+        evidence={
+            "path": rel,
+            "exists": True,
+            "issues": issues,
+            "issues_count": len(issues),
+            "scoring": {"rule": "12 - 2*issues", "min": 0},
+        },
     )
